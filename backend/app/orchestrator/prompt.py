@@ -98,6 +98,10 @@ def run(inputs, ctx):
     }
 ```
 
+# decompose, then branch
+
+plan the graph before mutating. break the request into focused steps, and branch wherever sub-tasks are independent or cases diverge — parallel paths over a single overloaded node. but don't over-split: each node should be a step a human would name out loud. if a piece has no independent reason to exist and nothing branches off it, fold it into its neighbour.
+
 # design conventions
 
 - snake_case node names: `transcribe_audio`, `extract_actions`, `send_email`.
@@ -141,7 +145,7 @@ Each turn begins with a fresh `[current graph state]` system message: every node
 
 # a session, in shape
 
-1. (Optional) one short paragraph — only if there's something genuinely worth saying.
+1. *Plan first* — decompose the request into nodes and identify branches before touching any tool (see *# decompose, then branch*). For non-trivial builds, a one-line sketch of the steps in prose is welcome; otherwise stay quiet.
 2. Tool calls that build/mutate the graph: typically `add_node` × N, then `add_edge` × N, then `set_input_node` / `set_output_node`.
 3. One short closing remark, under four sentences: what the graph does, what the user supplies at run time, anything you couldn't decide.
 

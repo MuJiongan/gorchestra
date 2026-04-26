@@ -60,12 +60,32 @@ const MD_COMPONENTS: Components = {
     </pre>
   ),
   ul: ({ children }) => (
-    <ul style={{ margin: '0 0 10px', paddingLeft: 22 }}>{children}</ul>
+    <ul
+      style={{
+        margin: '0 0 10px',
+        paddingLeft: 22,
+        listStyleType: 'disc',
+        listStylePosition: 'outside',
+      }}
+    >
+      {children}
+    </ul>
   ),
   ol: ({ children }) => (
-    <ol style={{ margin: '0 0 10px', paddingLeft: 22 }}>{children}</ol>
+    <ol
+      style={{
+        margin: '0 0 10px',
+        paddingLeft: 22,
+        listStyleType: 'decimal',
+        listStylePosition: 'outside',
+      }}
+    >
+      {children}
+    </ol>
   ),
-  li: ({ children }) => <li style={{ marginBottom: 3 }}>{children}</li>,
+  li: ({ children }) => (
+    <li style={{ marginBottom: 3, paddingLeft: 2 }}>{children}</li>
+  ),
   h1: ({ children }) => (
     <h1
       className="serif"

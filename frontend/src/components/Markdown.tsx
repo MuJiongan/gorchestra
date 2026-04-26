@@ -69,12 +69,32 @@ export function Markdown({ children }: { children: string }) {
             </a>
           ),
           ul: ({ children }) => (
-            <ul style={{ paddingLeft: 18, margin: '0 0 8px' }}>{children}</ul>
+            <ul
+              style={{
+                paddingLeft: 22,
+                margin: '0 0 8px',
+                listStyleType: 'disc',
+                listStylePosition: 'outside',
+              }}
+            >
+              {children}
+            </ul>
           ),
           ol: ({ children }) => (
-            <ol style={{ paddingLeft: 18, margin: '0 0 8px' }}>{children}</ol>
+            <ol
+              style={{
+                paddingLeft: 22,
+                margin: '0 0 8px',
+                listStyleType: 'decimal',
+                listStylePosition: 'outside',
+              }}
+            >
+              {children}
+            </ol>
           ),
-          li: ({ children }) => <li style={{ marginBottom: 2 }}>{children}</li>,
+          li: ({ children }) => (
+            <li style={{ marginBottom: 2, paddingLeft: 2 }}>{children}</li>
+          ),
           blockquote: ({ children }) => (
             <blockquote
               style={{

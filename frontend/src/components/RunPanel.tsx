@@ -269,7 +269,7 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
               )}
             </div>
             <textarea
-              rows={2}
+              rows={1}
               className="field"
               style={{
                 resize: 'vertical',

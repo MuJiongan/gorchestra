@@ -113,8 +113,17 @@ export default function App() {
       if (sessions.length === 0) return;
       const sid = sessions[0].id;
       const history = await api.getSessionMessages(sid);
-      setSessionByWorkflow((prev) => ({ ...prev, [wid]: sid }));
-      setChatByWorkflow((prev) => ({ ...prev, [wid]: historyToChatMessages(history.messages) }));
+      const bubbles = historyToChatMessages(history.messages);
+      // Race: if the user typed into a brand-new workflow, handleSend may have
+      // already created a session and started a stream while we were fetching.
+      // Trampling the optimistic [user, placeholder] would orphan the
+      // in-flight SSE updates (updateAssistant bails when the last bubble is
+      // no longer a streaming assistant) — the user then sees nothing until
+      // they refresh. Skip the write when newer in-memory state exists.
+      setSessionByWorkflow((prev) => (prev[wid] ? prev : { ...prev, [wid]: sid }));
+      setChatByWorkflow((prev) =>
+        (prev[wid] && prev[wid].length > 0) ? prev : { ...prev, [wid]: bubbles },
+      );
     } catch {
       /* ignore — leave panel empty */
     }

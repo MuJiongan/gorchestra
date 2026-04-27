@@ -30,30 +30,6 @@ const PANEL_STYLE: React.CSSProperties = {
   zIndex: 30,
 };
 
-const FULLSCREEN_STYLE: React.CSSProperties = {
-  position: 'fixed',
-  top: 24,
-  left: 24,
-  right: 24,
-  bottom: 24,
-  width: 'auto',
-  background: 'var(--paper)',
-  border: '1px solid var(--rule)',
-  borderRadius: 4,
-  display: 'flex',
-  flexDirection: 'column',
-  zIndex: 60,
-  boxShadow: '0 1px 0 rgba(26, 23, 20, 0.04), 0 40px 100px -40px rgba(26, 23, 20, 0.45)',
-};
-
-const FULLSCREEN_BACKDROP: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(26, 23, 20, 0.18)',
-  zIndex: 55,
-  backdropFilter: 'blur(2px)',
-};
-
 interface NodeTrace {
   node_id: string;
   status: NodeRunStatus;
@@ -137,22 +113,10 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   const [values, setValues] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<Run[]>([]);
   const [historicalRun, setHistoricalRun] = useState<Run | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     api.listRuns(workflow.id).then(setHistory).catch(() => {});
   }, [workflow.id]);
-
-  // Esc collapses fullscreen first; if already side-panel, the parent's own
-  // close logic isn't triggered (would be too greedy — let the user click ✕).
-  useEffect(() => {
-    if (!isFullscreen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsFullscreen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isFullscreen]);
 
   // Refresh history when a run finishes so the latest one shows up.
   useEffect(() => {
@@ -196,22 +160,11 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   const status = currentRun?.status;
 
   return (
-    <>
-      {isFullscreen && (
-        <div style={FULLSCREEN_BACKDROP} onClick={() => setIsFullscreen(false)} />
-      )}
-      <div className="fade-in" style={isFullscreen ? FULLSCREEN_STYLE : PANEL_STYLE}>
+    <div className="fade-in" style={PANEL_STYLE}>
       <div style={{ padding: '14px 18px 10px', borderBottom: '1px solid var(--rule)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="smallcaps">run</span>
           <span style={{ flex: 1 }} />
-          <button
-            className="ed-btn ed-btn--mini"
-            onClick={() => setIsFullscreen((v) => !v)}
-            title={isFullscreen ? 'collapse to side panel (esc)' : 'expand to fullscreen'}
-          >
-            {isFullscreen ? 'collapse' : 'expand'} <span className="ed-btn__mark">⤢</span>
-          </button>
           <button
             className="ed-btn ed-btn--mini"
             onClick={onClose}
@@ -364,8 +317,7 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           </button>
         )}
       </div>
-      </div>
-    </>
+    </div>
   );
 }
 

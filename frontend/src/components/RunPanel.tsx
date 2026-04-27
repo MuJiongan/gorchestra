@@ -23,41 +23,11 @@ const STATE_CLASS: Record<NodeRunStatus, string> = {
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
-  top: 16,
-  right: 16,
-  bottom: 16,
-  width: 460,
+  inset: 0,
   background: 'var(--paper)',
-  border: '1px solid var(--rule)',
-  borderRadius: 4,
   display: 'flex',
   flexDirection: 'column',
   zIndex: 30,
-  boxShadow: '0 1px 0 rgba(26, 23, 20, 0.04), 0 24px 60px -28px rgba(26, 23, 20, 0.25)',
-};
-
-const FULLSCREEN_STYLE: React.CSSProperties = {
-  position: 'fixed',
-  top: 24,
-  left: 24,
-  right: 24,
-  bottom: 24,
-  width: 'auto',
-  background: 'var(--paper)',
-  border: '1px solid var(--rule)',
-  borderRadius: 4,
-  display: 'flex',
-  flexDirection: 'column',
-  zIndex: 60,
-  boxShadow: '0 1px 0 rgba(26, 23, 20, 0.04), 0 40px 100px -40px rgba(26, 23, 20, 0.45)',
-};
-
-const FULLSCREEN_BACKDROP: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(26, 23, 20, 0.18)',
-  zIndex: 55,
-  backdropFilter: 'blur(2px)',
 };
 
 interface NodeTrace {
@@ -143,22 +113,10 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   const [values, setValues] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<Run[]>([]);
   const [historicalRun, setHistoricalRun] = useState<Run | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     api.listRuns(workflow.id).then(setHistory).catch(() => {});
   }, [workflow.id]);
-
-  // Esc collapses fullscreen first; if already side-panel, the parent's own
-  // close logic isn't triggered (would be too greedy — let the user click ✕).
-  useEffect(() => {
-    if (!isFullscreen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsFullscreen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isFullscreen]);
 
   // Refresh history when a run finishes so the latest one shows up.
   useEffect(() => {
@@ -202,29 +160,16 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   const status = currentRun?.status;
 
   return (
-    <>
-      {isFullscreen && (
-        <div style={FULLSCREEN_BACKDROP} onClick={() => setIsFullscreen(false)} />
-      )}
-      <div className="fade-in" style={isFullscreen ? FULLSCREEN_STYLE : PANEL_STYLE}>
+    <div className="fade-in" style={PANEL_STYLE}>
       <div style={{ padding: '14px 18px 10px', borderBottom: '1px solid var(--rule)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="smallcaps">run</span>
           <span style={{ flex: 1 }} />
           <button
-            className="btn-ghost"
-            onClick={() => setIsFullscreen((v) => !v)}
-            style={{ padding: '3px 9px', fontSize: 11 }}
-            title={isFullscreen ? 'collapse to side panel (esc)' : 'expand to fullscreen'}
-          >
-            {isFullscreen ? 'collapse' : 'expand'} <span className="italic-em">⤢</span>
-          </button>
-          <button
-            className="btn-ghost"
+            className="ed-btn ed-btn--mini"
             onClick={onClose}
-            style={{ padding: '3px 9px', fontSize: 11 }}
           >
-            close ✕
+            close <span className="ed-btn__mark">×</span>
           </button>
         </div>
         <div
@@ -358,22 +303,21 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
                   : 'standing by'}
         </span>
         {running ? (
-          <button className="btn-ghost" onClick={onCancel} style={{ borderColor: 'var(--state-err)', color: 'var(--state-err)' }}>
-            cancel ✕
+          <button className="ed-btn ed-btn--danger" onClick={onCancel}>
+            cancel <span className="ed-btn__mark">×</span>
           </button>
         ) : (
-          <button className="btn-ink" onClick={start} disabled={!inputNode}>
+          <button className="ed-btn ed-btn--primary" onClick={start} disabled={!inputNode}>
             {status === 'error' || status === 'cancelled'
               ? 'try again'
               : status === 'success'
                 ? 'rerun'
                 : 'execute'}{' '}
-            <span className="italic-em">→</span>
+            <span className="ed-btn__mark">→</span>
           </button>
         )}
       </div>
-      </div>
-    </>
+    </div>
   );
 }
 

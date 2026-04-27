@@ -124,11 +124,13 @@ def start_run(wid: str, body: schemas.RunStartIn, db: Session = Depends(get_db))
     import os as _os
     wf_data = _serialize_workflow(w)
     # localStorage (forwarded via header → env by middleware) wins; DB row is
-    # the backwards-compat fallback.
+    # the backwards-compat fallback. Final fallback: a sane current default.
     default_model = _os.getenv("DEFAULT_NODE_MODEL", "")
     if not default_model:
         setting = db.query(models.Setting).filter_by(key="default_node_model").first()
         default_model = setting.value if setting and setting.value else ""
+    if not default_model:
+        default_model = "anthropic/claude-sonnet-4.6"
 
     # Pre-create the run state so a WS client subscribing immediately doesn't race.
     ev_mod.get_or_create(run.id)

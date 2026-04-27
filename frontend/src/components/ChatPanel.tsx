@@ -228,6 +228,7 @@ interface Props {
   disabled?: boolean;
   sessionTitle?: string;
   modelLabel?: string;
+  onClose?: () => void;
 }
 
 function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
@@ -356,7 +357,16 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
         <div className="smallcaps" style={{ marginBottom: 6, color: 'var(--ink-3)' }}>
           you
         </div>
-        <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'var(--ink)' }}>{msg.text}</div>
+        <div
+          style={{
+            fontFamily: 'var(--serif)',
+            fontSize: 14.5,
+            lineHeight: 1.55,
+            color: 'var(--ink)',
+          }}
+        >
+          {msg.text}
+        </div>
       </div>
     );
   }
@@ -416,7 +426,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
-export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, modelLabel }: Props) {
+export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, modelLabel, onClose }: Props) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -453,11 +463,28 @@ export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, 
           <span style={{ flex: 1 }} />
           <span
             className="mono"
-            style={{ fontSize: 10.5, color: 'var(--ink-4)' }}
-            title={modelLabel ? undefined : 'no orchestrator model set — using server fallback'}
+            style={{
+              fontSize: 10.5,
+              color: 'var(--ink-4)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: 160,
+            }}
+            title={modelLabel || 'no orchestrator model set — using server fallback'}
           >
             {modelLabel || '(default)'}
           </span>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="btn-ghost"
+              style={{ padding: '3px 9px', fontSize: 11 }}
+              title="close chat"
+            >
+              close ✕
+            </button>
+          )}
         </div>
         <div
           className="serif"

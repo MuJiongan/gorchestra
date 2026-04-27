@@ -3,6 +3,7 @@ import Editor from '@monaco-editor/react';
 import type { WFNode, IOPort, WorkflowDetail, Run, NodeRun, NodeRunStatus } from '../types';
 import { api } from '../api';
 import { JsonView } from './JsonView';
+import { ModelInput } from './ModelInput';
 
 const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
   pending: 'idle',
@@ -25,17 +26,11 @@ type Tab = 'code' | 'i/o' | 'config' | 'last run';
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
-  top: 16,
-  right: 16,
-  bottom: 16,
-  width: 540,
+  inset: 0,
   background: 'var(--paper)',
-  border: '1px solid var(--rule)',
-  borderRadius: 4,
   display: 'flex',
   flexDirection: 'column',
   zIndex: 20,
-  boxShadow: '0 1px 0 rgba(26, 23, 20, 0.04), 0 24px 60px -28px rgba(26, 23, 20, 0.25)',
 };
 
 /**
@@ -226,20 +221,12 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
         {tab === 'config' && (
           <div style={{ padding: 18 }}>
             <ConfigRow k="model">
-              <input
-                className="mono"
-                style={{
-                  width: '100%',
-                  background: 'transparent',
-                  border: '1px solid var(--rule)',
-                  borderRadius: 3,
-                  padding: '5px 9px',
-                  fontSize: 12,
-                  color: 'var(--ink-2)',
-                }}
-                placeholder="(use default from settings)"
+              <ModelInput
                 value={model}
-                onChange={(e) => { setModel(e.target.value); setDirty(true); }}
+                onChange={(v) => { setModel(v); setDirty(true); }}
+                placeholder="(use default from settings)"
+                variant="bordered"
+                ariaLabel="model"
               />
             </ConfigRow>
             <ConfigRow k="tools">

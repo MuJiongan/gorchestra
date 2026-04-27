@@ -201,6 +201,71 @@ html, body, #root {
 .btn-ink:active { transform: translateY(0.5px); }
 .btn-ink:disabled { background: var(--ink-4); cursor: not-allowed; }
 
+/* editorial button — unified style for nav + utility buttons.
+   Smallcaps label on a soft chip fill. Reuses the design system's
+   smallcaps vocabulary (already used for state pills, section marks)
+   so the eye reads it as an action label, while the chip fill provides
+   a clear button affordance without the heaviness of a full border. */
+.ed-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--paper-2);
+  border: 0;
+  border-radius: 3px;
+  padding: 7px 13px;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background .15s, color .15s, transform .12s;
+}
+.ed-btn:hover:not(:disabled) {
+  background: rgba(26, 23, 20, 0.07);
+  color: var(--ink);
+}
+.ed-btn:active:not(:disabled) { transform: translateY(0.5px); }
+.ed-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ed-btn__mark {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-4);
+  line-height: 1;
+}
+.ed-btn:hover:not(:disabled) .ed-btn__mark { color: var(--ink-3); }
+.ed-btn--primary {
+  background: var(--ink);
+  color: var(--paper);
+}
+.ed-btn--primary:hover:not(:disabled) {
+  background: var(--ink-2);
+  color: var(--paper);
+}
+.ed-btn--primary .ed-btn__mark { color: rgba(245, 241, 232, 0.7); }
+.ed-btn--primary:hover:not(:disabled) .ed-btn__mark { color: var(--paper); }
+.ed-btn--mini {
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  padding: 5px 10px;
+  gap: 6px;
+}
+.ed-btn--mini .ed-btn__mark { font-size: 12px; }
+.ed-btn--danger {
+  background: rgba(200, 70, 60, 0.10);
+  color: var(--state-err);
+}
+.ed-btn--danger:hover:not(:disabled) {
+  background: rgba(200, 70, 60, 0.16);
+  color: var(--state-err);
+}
+.ed-btn--danger .ed-btn__mark { color: var(--state-err); }
+
 .field {
   width: 100%;
   background: transparent;

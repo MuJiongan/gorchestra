@@ -3,10 +3,9 @@ import {
   ReactFlow, ReactFlowProvider, Controls,
   Handle, Position,
   type Node as RFNode, type Edge as RFEdge,
-  type NodeChange, type NodeProps,
+  type NodeProps,
 } from '@xyflow/react';
 import type { WorkflowDetail, IOPort, NodeRunStatus } from '../types';
-import { api } from '../api';
 
 interface CanvasProps {
   detail: WorkflowDetail;
@@ -274,8 +273,177 @@ function CanvasLegend() {
   );
 }
 
+// Vertical layered layout — input nodes at the top, flow downward by edge depth.
+// Within each layer, ordering is decided by the Sugiyama barycenter heuristic
+// for crossing reduction: each node's column is the average column of its
+// neighbors in the adjacent layer, sorted, sweeping down then up until stable.
+// This is the standard layered-graph algorithm (what dagre / Graphviz do) and
+// produces a layout that follows the data flow and minimizes edge crossings.
+// Approximate the rendered height of a node card from its content. Mirrors
+// the paddings / line-heights / port row sizes in <NodeBlock>. Used so the
+// vertical layout can space each layer below the *bottom* of the layer above
+// — a fixed Y_GAP would let tall nodes (long descriptions, many ports)
+// overlap into the next layer.
+function estimateNodeHeight(n: WorkflowDetail['nodes'][number]): number {
+  // Header: padding 10/14/8 + name line at fontSize 12 (~16px line box).
+  let h = 10 + 16 + 8;
+  if (n.config?.tools_enabled?.length) {
+    h += 4 /* marginTop */ + 11 /* tools row line box */;
+  }
+  h += 1; // border-bottom on header
+
+  if (n.description) {
+    // Description block: padding 6/14/8, fontSize 12.5, lineHeight 1.4.
+    // Width inside padding ≈ 240 - 14*2 = 212px; serif italic averages
+    // ~6.5 px/char, so ~32 chars per line is a reasonable estimate.
+    const charsPerLine = 32;
+    const lines = Math.max(1, Math.ceil(n.description.length / charsPerLine));
+    h += 6 + lines * Math.ceil(12.5 * 1.4) + 8;
+  }
+
+  const portCount = Math.max(n.inputs.length, n.outputs.length);
+  if (portCount > 0) {
+    // Ports block: padding 6/14/12, gap 6 between rows, minHeight 14 per row.
+    h += 6 + portCount * 14 + Math.max(0, portCount - 1) * 6 + 12;
+  }
+  return Math.ceil(h);
+}
+
+function computeVerticalLayout(
+  nodes: WorkflowDetail['nodes'],
+  edges: WorkflowDetail['edges'],
+): Record<string, { x: number; y: number }> {
+  const X_GAP = 280;
+  const ROW_GAP = 70; // visual gap between a layer's bottom and the next layer's top
+
+  const incoming: Record<string, string[]> = {};
+  const outgoing: Record<string, string[]> = {};
+  for (const n of nodes) {
+    incoming[n.id] = [];
+    outgoing[n.id] = [];
+  }
+  for (const e of edges) {
+    if (incoming[e.to_node_id]) incoming[e.to_node_id].push(e.from_node_id);
+    if (outgoing[e.from_node_id]) outgoing[e.from_node_id].push(e.to_node_id);
+  }
+
+  // Orphan-aware fast path: while the orchestrator is still adding nodes and
+  // hasn't drawn any edges yet, stack the nodes vertically (one per row, in
+  // insertion order) instead of cramming them into a single horizontal row.
+  // Once any edge exists, we fall through to the layered + barycenter path.
+  if (edges.length === 0) {
+    const out: Record<string, { x: number; y: number }> = {};
+    let y = 0;
+    nodes.forEach((n) => {
+      out[n.id] = { x: 0, y };
+      y += estimateNodeHeight(n) + ROW_GAP;
+    });
+    return out;
+  }
+
+  // Layer assignment: longest path from any source.
+  const depth: Record<string, number> = {};
+  const visiting = new Set<string>();
+  const getDepth = (id: string): number => {
+    if (depth[id] !== undefined) return depth[id];
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    let d = 0;
+    for (const p of incoming[id] ?? []) d = Math.max(d, getDepth(p) + 1);
+    visiting.delete(id);
+    depth[id] = d;
+    return d;
+  };
+  for (const n of nodes) getDepth(n.id);
+
+  const maxDepth = nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => depth[n.id]));
+  const layerOrder: string[][] = Array.from({ length: maxDepth + 1 }, () => []);
+  for (const n of nodes) layerOrder[depth[n.id]].push(n.id);
+
+  // Initial intra-layer order: alphabetical, just so the starting state is
+  // stable across renders.
+  const nameOf = (id: string) => nodes.find((n) => n.id === id)?.name ?? id;
+  for (const layer of layerOrder) layer.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+
+  // Barycenter sweep — for each layer, reorder by the mean index of its
+  // neighbors in the adjacent layer. Down-sweep uses predecessors, up-sweep
+  // uses successors. Iterate until ordering is stable (or 24 sweeps, whichever
+  // first — typical convergence is 2–6 sweeps).
+  const orderKey = () => layerOrder.map((l) => l.join(',')).join('|');
+  const buildIndexMap = () => {
+    const m: Record<number, Map<string, number>> = {};
+    layerOrder.forEach((layer, d) => {
+      const map = new Map<string, number>();
+      layer.forEach((id, i) => map.set(id, i));
+      m[d] = map;
+    });
+    return m;
+  };
+  const reorderLayer = (
+    layerIdx: number,
+    neighborsOf: (id: string) => string[],
+    neighborLayerIdx: number,
+    idxByLayer: Record<number, Map<string, number>>,
+  ) => {
+    const layer = layerOrder[layerIdx];
+    const bc = new Map<string, number>();
+    layer.forEach((id, i) => {
+      const nbs = neighborsOf(id).filter((nb) => depth[nb] === neighborLayerIdx);
+      if (nbs.length === 0) {
+        bc.set(id, i); // no neighbors in target layer — keep current spot
+        return;
+      }
+      const sum = nbs.reduce((acc, nb) => acc + (idxByLayer[neighborLayerIdx].get(nb) ?? 0), 0);
+      bc.set(id, sum / nbs.length);
+    });
+    // Stable sort: ties keep insertion order (ES2019+).
+    layer.sort((a, b) => (bc.get(a) ?? 0) - (bc.get(b) ?? 0));
+  };
+
+  for (let sweep = 0; sweep < 24; sweep++) {
+    const before = orderKey();
+    let idx = buildIndexMap();
+    for (let d = 1; d <= maxDepth; d++) {
+      reorderLayer(d, (id) => incoming[id], d - 1, idx);
+      idx = buildIndexMap();
+    }
+    for (let d = maxDepth - 1; d >= 0; d--) {
+      reorderLayer(d, (id) => outgoing[id], d + 1, idx);
+      idx = buildIndexMap();
+    }
+    if (orderKey() === before) break;
+  }
+
+  // Per-layer y is anchored to the bottom of the layer above + ROW_GAP, using
+  // each layer's tallest node so nothing overlaps even when one row mixes
+  // short and tall cards.
+  const heightOf = (id: string) => {
+    const n = nodes.find((x) => x.id === id);
+    return n ? estimateNodeHeight(n) : 0;
+  };
+  const layerHeights = layerOrder.map((layer) =>
+    layer.length === 0 ? 0 : Math.max(...layer.map(heightOf)),
+  );
+  const layerY: number[] = [0];
+  for (let d = 1; d <= maxDepth; d++) {
+    layerY[d] = layerY[d - 1] + layerHeights[d - 1] + ROW_GAP;
+  }
+
+  const out: Record<string, { x: number; y: number }> = {};
+  layerOrder.forEach((layer, d) => {
+    layer.forEach((id, i) => {
+      out[id] = { x: (i - (layer.length - 1) / 2) * X_GAP, y: layerY[d] };
+    });
+  });
+  return out;
+}
+
 function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: CanvasProps) {
   const states = nodeStates ?? {};
+  const positions = useMemo(
+    () => computeVerticalLayout(detail.nodes, detail.edges),
+    [detail.nodes, detail.edges],
+  );
   const rfNodes: RFNode[] = useMemo(
     () =>
       detail.nodes.map((n) => {
@@ -287,7 +455,7 @@ function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: Canva
         return {
           id: n.id,
           type: 'wfNode',
-          position: n.position ?? { x: 0, y: 0 },
+          position: positions[n.id] ?? { x: 0, y: 0 },
           data: {
             label: n.name,
             description: n.description,
@@ -301,7 +469,7 @@ function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: Canva
           } satisfies NodeData,
         };
       }),
-    [detail, selectedNodeId, states],
+    [detail, selectedNodeId, states, positions],
   );
 
   const rfEdges: RFEdge[] = useMemo(
@@ -329,17 +497,9 @@ function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: Canva
     [detail.edges, states],
   );
 
-  // Position drags (the only user-driven graph mutation we still allow) are
-  // persisted so the orchestrator's auto-layout is overridable. Topology —
-  // adding / removing nodes and edges — is owned by the orchestrator.
-  const onNodesChange = useCallback(async (changes: NodeChange[]) => {
-    for (const c of changes) {
-      if (c.type === 'position' && c.dragging === false && c.position) {
-        try { await api.patchNode(c.id, { position: c.position }); } catch { /* ignore */ }
-      }
-    }
-  }, []);
-
+  // Topology and positions are both orchestrator-owned now — the canvas auto-
+  // layouts vertically (input nodes top, flowing down), so user drags would
+  // just snap back. Drags are disabled below via `nodesDraggable={false}`.
   const onNodeClick = useCallback((_: unknown, n: RFNode) => onSelectNode(n.id), [onSelectNode]);
   const onPaneClick = useCallback(() => onSelectNode(null), [onSelectNode]);
 
@@ -375,16 +535,19 @@ function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: Canva
           nodes={rfNodes}
           edges={rfEdges}
           nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
-          // Topology is read-only from the user's side — only the orchestrator
-          // adds or removes nodes / edges. Position drags still work.
+          // Topology and layout are orchestrator-owned. Canvas auto-layouts
+          // top-to-bottom so drags would snap back — disable them.
+          nodesDraggable={false}
           nodesConnectable={false}
           edgesFocusable={false}
           edgesReconnectable={false}
           deleteKeyCode={null}
           fitView
+          fitViewOptions={{ padding: 0.25, maxZoom: 0.8, minZoom: 0.3 }}
+          minZoom={0.2}
+          maxZoom={1.2}
           proOptions={{ hideAttribution: true }}
         >
           <Controls showInteractive={false} />

@@ -20,7 +20,7 @@ from app.orchestrator.prompt import SYSTEM_PROMPT, graph_state_message
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL_FALLBACK = "anthropic/claude-sonnet-4.5"
+DEFAULT_MODEL_FALLBACK = "anthropic/claude-opus-4.7"
 MAX_TURNS = 12
 
 # Extended-thinking config. Trade-off: more thinking → better plans, but the

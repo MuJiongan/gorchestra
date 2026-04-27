@@ -1,6 +1,7 @@
 """System prompt + per-turn graph state injection for the orchestrator."""
 from __future__ import annotations
 import json
+from datetime import date
 
 from sqlalchemy.orm import Session as DbSession
 
@@ -109,6 +110,7 @@ plan the graph before mutating. break the request into focused steps, and branch
 - prefer several focused nodes over one giant node.
 - leave `model=""` for nodes that don't call an LLM, or to use the user's default.
 - only enable tools a node actually uses. `shell` is dangerous — opt in deliberately.
+- *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`), `inputs`/`outputs`, and — for any node that calls `ctx.call_llm` — the matching `tools_enabled`. nodes are not placeholders to fill in later.
 
 # your tool surface
 
@@ -194,6 +196,7 @@ def graph_state_message(db: DbSession, workflow_id: str) -> dict:
     ]
 
     state = {
+        "today": date.today().isoformat(),
         "workflow_id": w.id,
         "name": w.name,
         "input_node_id": w.input_node_id,

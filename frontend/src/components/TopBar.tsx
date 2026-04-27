@@ -91,10 +91,7 @@ export function TopBar({
         >
           orchestra
         </span>
-        <span style={{ color: 'var(--ink-4)', fontSize: 14 }}>.</span>
       </div>
-
-      <span className="rule-v" style={{ height: 22 }} />
 
       <span className="smallcaps" style={{ color: 'var(--ink-4)' }}>session</span>
 
@@ -220,14 +217,14 @@ export function TopBar({
         </span>
       )}
 
-      <button className="btn-ghost" onClick={onOpenSettings}>
+      <button className="ed-btn" onClick={onOpenSettings}>
         settings
       </button>
-      <button className="btn-ghost" onClick={onNew}>
-        new <span className="italic-em">+</span>
+      <button className="ed-btn" onClick={onNew}>
+        new <span className="ed-btn__mark">+</span>
       </button>
-      <button className="btn-ink" onClick={onOpenRun} disabled={runDisabled}>
-        run <span className="italic-em">→</span>
+      <button className="ed-btn ed-btn--primary" onClick={onOpenRun} disabled={runDisabled}>
+        run <span className="ed-btn__mark">→</span>
       </button>
     </div>
   );

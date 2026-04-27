@@ -198,6 +198,7 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 
 **On the roadmap, partially or wholly unimplemented:**
 - **Orchestrator-driven test runs.** `run_workflow`, `get_run`, and `generate_test_data` tools so the orchestrator can run, inspect logs/errors, and self-debug between turns. The data model already carries `Run.kind = "test"` to distinguish them.
+- **Generative UI (designer agent).** A second LLM agent — the **designer** — that emits a single self-contained HTML/CSS/JS page tailored to the workflow's input/output shape, so the workflow can be invoked from a purpose-built UI rather than the generic textarea form. Invocation paths: (a) the orchestrator calls the designer as a tool when it judges the workflow stable enough to "ship a UI for"; (b) a dedicated **Design** tab in the app where the user asks the designer directly. Output is a single HTML document (inline CSS/JS, no build step) that posts to the workflow's run endpoint and renders results — dynamic per task: a chat box for a Q&A workflow, a form + table for a data-extraction workflow, a file dropzone for a doc-processing workflow, etc. Stored alongside the workflow; regeneratable. Open questions: where the page is hosted (served from the backend at `/w/{workflow_id}` vs. exported as a standalone file), how it authenticates to the run endpoint in the local-only model, and how it handles streaming run events.
 - **File-typed inputs.** Run panel currently exposes textareas only; file upload for file-typed input ports isn't built.
 - **Token streaming inside nodes.** `ctx.call_llm` returns the full response; per-token streaming into the node panel during a run isn't wired.
 - **Run pruning.** Older runs aren't auto-deleted once a workflow exceeds 20.
@@ -217,4 +218,5 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 4. **Live run streaming** ✅ WebSocket pub/sub, per-node states on canvas, cancellation.
 5. **Orchestrator v1** ✅ chat session, SSE streaming with extended thinking, graph-mutation tool surface, `user_edited` awareness, mid-turn cancellation/supersession.
 6. **Orchestrator test-run loop** ⏳ `run_workflow` / `get_run` / `generate_test_data` so the orchestrator can run, inspect, and fix without the user in the loop.
-7. **Polish** ⏳ file-typed inputs, run pruning, single-package packaging, in-node token streaming.
+7. **Generative UI / designer agent** ⏳ second agent that emits a workflow-specific HTML page; invokable as an orchestrator tool and from a dedicated Design tab.
+8. **Polish** ⏳ file-typed inputs, run pruning, single-package packaging, in-node token streaming.

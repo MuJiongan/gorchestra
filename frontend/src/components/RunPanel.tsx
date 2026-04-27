@@ -23,17 +23,11 @@ const STATE_CLASS: Record<NodeRunStatus, string> = {
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
-  top: 16,
-  right: 16,
-  bottom: 16,
-  width: 460,
+  inset: 0,
   background: 'var(--paper)',
-  border: '1px solid var(--rule)',
-  borderRadius: 4,
   display: 'flex',
   flexDirection: 'column',
   zIndex: 30,
-  boxShadow: '0 1px 0 rgba(26, 23, 20, 0.04), 0 24px 60px -28px rgba(26, 23, 20, 0.25)',
 };
 
 const FULLSCREEN_STYLE: React.CSSProperties = {
@@ -212,19 +206,17 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           <span className="smallcaps">run</span>
           <span style={{ flex: 1 }} />
           <button
-            className="btn-ghost"
+            className="ed-btn ed-btn--mini"
             onClick={() => setIsFullscreen((v) => !v)}
-            style={{ padding: '3px 9px', fontSize: 11 }}
             title={isFullscreen ? 'collapse to side panel (esc)' : 'expand to fullscreen'}
           >
-            {isFullscreen ? 'collapse' : 'expand'} <span className="italic-em">⤢</span>
+            {isFullscreen ? 'collapse' : 'expand'} <span className="ed-btn__mark">⤢</span>
           </button>
           <button
-            className="btn-ghost"
+            className="ed-btn ed-btn--mini"
             onClick={onClose}
-            style={{ padding: '3px 9px', fontSize: 11 }}
           >
-            close ✕
+            close <span className="ed-btn__mark">×</span>
           </button>
         </div>
         <div
@@ -358,17 +350,17 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
                   : 'standing by'}
         </span>
         {running ? (
-          <button className="btn-ghost" onClick={onCancel} style={{ borderColor: 'var(--state-err)', color: 'var(--state-err)' }}>
-            cancel ✕
+          <button className="ed-btn ed-btn--danger" onClick={onCancel}>
+            cancel <span className="ed-btn__mark">×</span>
           </button>
         ) : (
-          <button className="btn-ink" onClick={start} disabled={!inputNode}>
+          <button className="ed-btn ed-btn--primary" onClick={start} disabled={!inputNode}>
             {status === 'error' || status === 'cancelled'
               ? 'try again'
               : status === 'success'
                 ? 'rerun'
                 : 'execute'}{' '}
-            <span className="italic-em">→</span>
+            <span className="ed-btn__mark">→</span>
           </button>
         )}
       </div>

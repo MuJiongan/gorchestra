@@ -1,17 +1,21 @@
 .PHONY: install backend frontend test clean
 
+VENV := backend/.venv
+
 install:
-	cd backend && python -m pip install -e ".[dev]"
+	python3 -m venv $(VENV)
+	$(VENV)/bin/pip install --upgrade pip
+	cd backend && .venv/bin/pip install -e ".[dev]"
 	cd frontend && npm install
 
 backend:
-	cd backend && uvicorn app.main:app --reload --port 8000
+	cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000
 
 frontend:
 	cd frontend && npm run dev
 
 test:
-	cd backend && pytest -q
+	cd backend && .venv/bin/pytest -q
 
 clean:
 	rm -f backend/*.db

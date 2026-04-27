@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Settings } from '../types';
 import { loadSettings, saveSettings } from '../localSettings';
+import { ModelInput } from './ModelInput';
 
 const EMPTY: Settings = {
   openrouter_api_key: '',
@@ -99,13 +100,13 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             reveal keys
           </label>
 
-          <Field
+          <ModelField
             label="default orchestrator model"
             value={s.default_orchestrator_model}
             onChange={(v) => setS({ ...s, default_orchestrator_model: v })}
             hint="used by the orchestrator. e.g. anthropic/claude-sonnet-4.5"
           />
-          <Field
+          <ModelField
             label="default node model"
             value={s.default_node_model}
             onChange={(v) => setS({ ...s, default_node_model: v })}
@@ -163,6 +164,32 @@ function Field({
           outline: 'none',
         }}
       />
+      {hint && (
+        <div
+          className="serif"
+          style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 6 }}
+        >
+          {hint}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelField({
+  label, value, onChange, hint,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  hint?: string;
+}) {
+  return (
+    <div>
+      <label className="smallcaps" style={{ display: 'block', marginBottom: 6 }}>
+        {label}
+      </label>
+      <ModelInput value={value} onChange={onChange} ariaLabel={label} />
       {hint && (
         <div
           className="serif"

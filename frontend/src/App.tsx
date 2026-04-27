@@ -604,39 +604,56 @@ export default function App() {
               </div>
             </div>
 
-            {/* floating chatbot — launcher when closed, panel when open.
-                Hidden while the run panel is open since both pin to bottom-right. */}
-            {!chatOpen && !showRunPanel && (
+            {/* floating chatbot — launcher when closed, panel when open. */}
+            {!chatOpen && (
               <button
                 onClick={() => setChatOpen(true)}
+                className="chat-tab-enter"
                 style={{
                   position: 'fixed',
-                  bottom: 24,
-                  right: 24,
-                  padding: '10px 18px',
+                  bottom: 80,
+                  right: 0,
+                  width: 50,
+                  height: 50,
+                  padding: 0,
                   background: 'var(--paper)',
                   border: '1px solid var(--rule)',
-                  borderRadius: 999,
-                  fontFamily: 'var(--mono)',
-                  fontSize: 12,
-                  letterSpacing: '0.06em',
-                  textTransform: 'lowercase',
+                  borderRight: 'none',
+                  borderTopLeftRadius: 4,
+                  borderBottomLeftRadius: 4,
+                  borderTopRightRadius: 0,
+                  borderBottomRightRadius: 0,
                   cursor: 'pointer',
                   zIndex: 50,
-                  boxShadow: '0 8px 28px -10px rgba(26, 23, 20, 0.25), 0 2px 6px -2px rgba(26, 23, 20, 0.15)',
+                  boxShadow: '-6px 0 22px -10px rgba(26, 23, 20, 0.22), -1px 0 4px -2px rgba(26, 23, 20, 0.14)',
                   display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
-                  gap: 8,
+                  justifyContent: 'center',
+                  gap: 4,
                   color: 'var(--ink)',
                 }}
-                title="open chat with the orchestrator"
+                title="open the orchestrator"
               >
-                <span className="smallcaps">chat</span>
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  style={{ color: 'var(--ink-2)' }}
+                >
+                  <path d="M6 4h12a4 4 0 0 1 4 4v6a4 4 0 0 1-4 4h-7l-4 3v-3H6a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z" />
+                </svg>
                 {isOrchestrating && (
                   <span
                     style={{
-                      width: 7,
-                      height: 7,
+                      width: 5,
+                      height: 5,
                       borderRadius: 999,
                       background: 'var(--accent, #c08552)',
                       animation: 'pulse 1.4s ease-in-out infinite',
@@ -646,8 +663,9 @@ export default function App() {
                 )}
               </button>
             )}
-            {chatOpen && !showRunPanel && (
+            {chatOpen && (
               <div
+                className="chat-enter"
                 style={{
                   position: 'fixed',
                   bottom: 24,

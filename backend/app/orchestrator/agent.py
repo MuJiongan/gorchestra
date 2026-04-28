@@ -23,18 +23,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL_FALLBACK = "anthropic/claude-opus-4.7"
 MAX_TURNS = 12
 
-# Extended-thinking config. Trade-off: more thinking → better plans, but the
-# user sees nothing in the chat until thinking completes (Anthropic via
-# OpenRouter doesn't reliably stream `reasoning_details` deltas during the
-# thinking phase, so it can feel like the stream stalled). We keep a *modest*
-# budget so first-content arrives in a few seconds — enough thinking to plan
-# a small graph, not enough to disappear for a minute.
-#
-# At effort="medium" the thinking budget is ~60% of max_tokens. 4000 → ~2400
-# think, ~1600 respond, which fits a typical planning round + a handful of
-# tool calls. Crank these up if you find the orchestrator under-thinking.
 REASONING_EFFORT = "medium"
-REASONING_MAX_TOKENS = 4000
 
 
 # ---------------------------------------------------------------------------
@@ -386,16 +375,12 @@ def _call_openrouter_stream(
         "messages": messages,
         "tools": tool_specs,
         "stream": True,
-        # Always-on extended thinking. With effort=high the budget is ~80% of
-        # max_tokens — leaving the remaining ~20% for the actual response
-        # (including any tool calls).
         "reasoning": {"effort": REASONING_EFFORT},
-        "max_tokens": REASONING_MAX_TOKENS,
         # Opt into OpenRouter's cost accounting — without this, `usage.cost`
         # is omitted from the final stream chunk and orchestrator cost is $0.
         "usage": {"include": True},
     }
-    with httpx.Client(timeout=180) as client:
+    with httpx.Client() as client:
         with client.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as r:
             if r.status_code >= 400:
                 body = r.read().decode(errors="replace")[:500]

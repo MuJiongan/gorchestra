@@ -59,6 +59,13 @@ export default function App() {
   const [showRunPanel, setShowRunPanel] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
 
+  // Mirror of `activeId` so async callbacks (SSE handlers, refreshDetail)
+  // can read the latest value without being trapped by render-time closures.
+  const activeIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
   // Workflow id → session id (one session per workflow for v0).
   const [sessionByWorkflow, setSessionByWorkflow] = useState<Record<string, string>>({});
   const [chatByWorkflow, setChatByWorkflow] = useState<Record<string, ChatMessage[]>>({});
@@ -101,15 +108,19 @@ export default function App() {
     return list;
   };
 
-  const refreshDetail = async () => {
-    if (!activeId) {
-      setDetail(null);
+  const refreshDetail = async (wid?: string) => {
+    const target = wid ?? activeIdRef.current;
+    if (!target) {
+      if (activeIdRef.current === null) setDetail(null);
       return;
     }
     try {
-      setDetail(await api.getWorkflow(activeId));
+      const d = await api.getWorkflow(target);
+      // Race guard: if the user switched workflows while we were fetching,
+      // drop the result so we don't clobber the new workflow's detail.
+      if (activeIdRef.current === target) setDetail(d);
     } catch {
-      setDetail(null);
+      if (activeIdRef.current === target) setDetail(null);
     }
   };
 
@@ -250,7 +261,7 @@ export default function App() {
           return { ...a, content };
         });
         if (ev.status === 'ok' && GRAPH_MUTATING_TOOLS.has(ev.tool)) {
-          if (activeId === wid) refreshDetail();
+          refreshDetail(wid);
         }
       } else if (ev.kind === 'error') {
         updateAssistant((a) => ({
@@ -276,7 +287,7 @@ export default function App() {
         }));
       }
     } finally {
-      if (activeId === wid) refreshDetail();
+      refreshDetail(wid);
       setOrchestratingIds((prev) => {
         const s = new Set(prev);
         s.delete(wid);

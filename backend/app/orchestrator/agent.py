@@ -380,7 +380,7 @@ def _call_openrouter_stream(
         # is omitted from the final stream chunk and orchestrator cost is $0.
         "usage": {"include": True},
     }
-    with httpx.Client() as client:
+    with httpx.Client(timeout=None) as client:
         with client.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as r:
             if r.status_code >= 400:
                 body = r.read().decode(errors="replace")[:500]

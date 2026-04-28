@@ -47,7 +47,7 @@ def call_llm(
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=None) as client:
         for _turn in range(max_turns):
             payload: dict = {
                 "model": model,

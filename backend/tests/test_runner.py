@@ -125,6 +125,104 @@ def test_error_in_node():
     assert "boom" in (result["error"] or "")
 
 
+def test_parallel_branches_run_concurrently():
+    """Two independent branches off `a` should overlap in wall time."""
+    code_sleep = """
+import time
+def run(inputs, ctx):
+    time.sleep(0.3)
+    return {'v': inputs['x']}
+"""
+    wf = {
+        "id": "wf",
+        "input_node_id": "a",
+        "output_node_id": "d",
+        "nodes": [
+            make_node(
+                "a",
+                "def run(inputs, ctx):\n    return {'v': inputs['x']}\n",
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+            make_node(
+                "b",
+                code_sleep,
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+            make_node(
+                "c",
+                code_sleep,
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+            make_node(
+                "d",
+                "def run(inputs, ctx):\n    return {'final': (inputs['p'] or 0) + (inputs['q'] or 0)}\n",
+                inputs=[
+                    {"name": "p", "required": True},
+                    {"name": "q", "required": True},
+                ],
+                outputs=[{"name": "final"}],
+            ),
+        ],
+        "edges": [
+            {"from_node_id": "a", "from_output": "v", "to_node_id": "b", "to_input": "x"},
+            {"from_node_id": "a", "from_output": "v", "to_node_id": "c", "to_input": "x"},
+            {"from_node_id": "b", "from_output": "v", "to_node_id": "d", "to_input": "p"},
+            {"from_node_id": "c", "from_output": "v", "to_node_id": "d", "to_input": "q"},
+        ],
+    }
+    import time as _t
+    t0 = _t.time()
+    result = run_workflow_sync(wf, {"x": 5})
+    elapsed = _t.time() - t0
+    assert result["status"] == "success", result
+    assert result["outputs"]["final"] == 10
+    assert elapsed < 0.55, f"branches did not run in parallel (took {elapsed:.2f}s)"
+
+
+def test_error_halts_run():
+    """If any node errors, the run is cancelled — downstream of healthy
+    branches still completes only if it was already in flight; no new nodes
+    are scheduled after the error."""
+    wf = {
+        "id": "wf",
+        "input_node_id": "a",
+        "output_node_id": "c",
+        "nodes": [
+            make_node(
+                "a",
+                "def run(inputs, ctx):\n    return {'v': inputs['x']}\n",
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+            make_node(
+                "b",
+                "def run(inputs, ctx):\n    raise ValueError('boom')\n",
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+            make_node(
+                "c",
+                "def run(inputs, ctx):\n    return {'v': inputs['x']}\n",
+                inputs=[{"name": "x", "required": True}],
+                outputs=[{"name": "v"}],
+            ),
+        ],
+        "edges": [
+            {"from_node_id": "a", "from_output": "v", "to_node_id": "b", "to_input": "x"},
+            {"from_node_id": "b", "from_output": "v", "to_node_id": "c", "to_input": "x"},
+        ],
+    }
+    result = run_workflow_sync(wf, {"x": 1})
+    assert result["status"] == "error"
+    assert "boom" in (result["error"] or "")
+    nrs = {nr["node_id"]: nr for nr in result["node_runs"]}
+    assert nrs["b"]["status"] == "error"
+    assert "c" not in nrs, "downstream node c must not run after b errors"
+
+
 def test_ctx_log_and_direct_tool_call():
     code = """
 def run(inputs, ctx):

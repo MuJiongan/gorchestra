@@ -50,7 +50,7 @@ Single-user, localhost-only for v1.
 
 ### 5.1 Orchestrator
 - LLM agent over OpenRouter; default model is read from the user's settings (`default_orchestrator_model`), falling back to `anthropic/claude-sonnet-4.5`.
-- Always-on extended thinking (`reasoning.effort = "medium"`, `max_tokens = 4000`). Reasoning details are persisted alongside each assistant message and replayed verbatim on the next turn — Anthropic enforces ordering of these blocks.
+- Always-on extended thinking (`reasoning.effort = "medium"`). Reasoning details are persisted alongside each assistant message and replayed verbatim on the next turn — Anthropic enforces ordering of these blocks.
 - System prompt covers: graph semantics, node runtime contract, available runtime tools, null-propagation rules, required-vs-optional inputs, the distinction between graph-shaping tools (the orchestrator calls these) and node-runtime tools (it equips nodes with these), tone conventions, and how to handle `user_edited` nodes.
 - Streams reasoning chunks, visible content chunks, tool-call start/end events, errors, and a terminal `done` event over **Server-Sent Events** (`POST /api/sessions/{sid}/messages`).
 - Per-turn it injects a fresh `[current graph state]` system message — every node's id/name/description/ports/model/tools/`user_edited` flag, every edge, and the input/output node ids. Code is intentionally omitted; the orchestrator pulls it via `view_node_details` when needed.

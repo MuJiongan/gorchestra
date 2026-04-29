@@ -30,77 +30,250 @@ const PANEL_STYLE: React.CSSProperties = {
   zIndex: 30,
 };
 
+// --- per-LLM-call streaming state ----------------------------------------
+//
+// A node may invoke ctx.call_llm multiple times concurrently (threading inside
+// the node body). Each invocation gets a unique `call_id` from the backend; we
+// track them in insertion order and render one card per call so streams don't
+// fight over the same DOM space.
+
+type LiveCallStatus = 'streaming' | 'done' | 'error';
+type ToolCallStatus = 'streaming' | 'pending' | 'ok' | 'err';
+
+interface NestedToolCall {
+  tc_index: number;
+  round: number;
+  tool: string;
+  args_str: string;            // accumulating raw arg-string while streaming
+  args?: Record<string, unknown>;  // parsed once the call actually fires
+  status: ToolCallStatus;
+  result?: unknown;
+  error?: string;
+}
+
+// One agent-loop turn within a single ctx.call_llm invocation.
+//
+// The LLM produces reasoning + content, optionally calls tools at the end of
+// the round, and the loop kicks off the next round with tool results. We
+// render rounds in order so the trace reflects actual chronology rather than
+// concatenating all content together with all tool calls dumped at the end.
+interface CallRound {
+  round: number;
+  reasoning: string;
+  content: string;
+  toolCalls: NestedToolCall[];
+}
+
+interface LiveLLMCall {
+  call_id: string;
+  model: string;
+  tools: string[];
+  rounds: CallRound[];                    // ordered by round index
+  roundsByIdx: Map<number, CallRound>;
+  status: LiveCallStatus;
+  cost?: number;
+  usage?: Record<string, unknown>;
+  errorMsg?: string;
+}
+
+interface DirectToolCall {
+  tool: string;
+  args: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
+}
+
 interface NodeTrace {
   node_id: string;
   status: NodeRunStatus;
   inputs?: Record<string, unknown>;
   outputs?: Record<string, unknown>;
   logs: string[];
-  llm_calls: Array<{ model: string; content: string; cost: number }>;
-  tool_calls: Array<{ tool: string; args: Record<string, unknown>; result?: unknown; error?: string; via: string }>;
+  llmCalls: LiveLLMCall[];          // insertion-ordered
+  llmCallById: Map<string, LiveLLMCall>;
+  directToolCalls: DirectToolCall[];
   error?: string | null;
   duration_ms?: number;
   cost?: number;
 }
 
+function ensureRound(call: LiveLLMCall, round: number | undefined): CallRound {
+  const r = round ?? 0;
+  let cr = call.roundsByIdx.get(r);
+  if (!cr) {
+    cr = { round: r, reasoning: '', content: '', toolCalls: [] };
+    call.roundsByIdx.set(r, cr);
+    // Maintain insertion-by-round-index ordering.
+    const i = call.rounds.findIndex((x) => x.round > r);
+    if (i === -1) call.rounds.push(cr);
+    else call.rounds.splice(i, 0, cr);
+  }
+  return cr;
+}
+
+function findNestedTool(round: CallRound, tc_index: number | undefined): NestedToolCall | undefined {
+  const idx = tc_index ?? 0;
+  return round.toolCalls.find((t) => t.tc_index === idx);
+}
+
 function aggregateEvents(events: RunEvent[]): NodeTrace[] {
   const byId = new Map<string, NodeTrace>();
   const order: string[] = [];
-  const ensure = (id: string): NodeTrace => {
+
+  const ensureNode = (id: string): NodeTrace => {
     let t = byId.get(id);
     if (!t) {
-      t = { node_id: id, status: 'pending', logs: [], llm_calls: [], tool_calls: [] };
+      t = {
+        node_id: id,
+        status: 'pending',
+        logs: [],
+        llmCalls: [],
+        llmCallById: new Map(),
+        directToolCalls: [],
+      };
       byId.set(id, t);
       order.push(id);
     }
     return t;
   };
+
+  const ensureCall = (t: NodeTrace, call_id: string, model = '', tools: string[] = []): LiveLLMCall => {
+    let c = t.llmCallById.get(call_id);
+    if (!c) {
+      c = {
+        call_id,
+        model,
+        tools,
+        rounds: [],
+        roundsByIdx: new Map(),
+        status: 'streaming',
+      };
+      t.llmCallById.set(call_id, c);
+      t.llmCalls.push(c);
+    } else {
+      if (model && !c.model) c.model = model;
+      if (tools.length && !c.tools.length) c.tools = tools;
+    }
+    return c;
+  };
+
   for (const ev of events) {
     if (ev.type === 'node_started') {
-      const t = ensure(ev.node_id);
+      const t = ensureNode(ev.node_id);
       t.status = 'running';
       t.inputs = ev.inputs;
     } else if (ev.type === 'log') {
-      ensure(ev.node_id).logs.push(ev.msg);
+      ensureNode(ev.node_id).logs.push(ev.msg);
+    } else if (ev.type === 'llm_call_started') {
+      ensureCall(ensureNode(ev.node_id), ev.call_id, ev.model, ev.tools);
+    } else if (ev.type === 'llm_round_started') {
+      ensureRound(ensureCall(ensureNode(ev.node_id), ev.call_id), ev.round);
+    } else if (ev.type === 'llm_call_chunk') {
+      const call = ensureCall(ensureNode(ev.node_id), ev.call_id);
+      const r = ensureRound(call, ev.round);
+      if (ev.kind === 'content') {
+        r.content += ev.delta;
+      } else if (ev.kind === 'reasoning') {
+        r.reasoning += ev.delta;
+      } else if (ev.kind === 'tool_args') {
+        let tc = findNestedTool(r, ev.tc_index);
+        if (!tc) {
+          tc = {
+            tc_index: ev.tc_index ?? 0,
+            round: r.round,
+            tool: ev.tool || '',
+            args_str: '',
+            status: 'streaming',
+          };
+          r.toolCalls.push(tc);
+        }
+        if (ev.tool && !tc.tool) tc.tool = ev.tool;
+        tc.args_str += ev.delta;
+      }
     } else if (ev.type === 'llm_call_finished') {
-      ensure(ev.node_id).llm_calls.push({
-        model: ev.model,
-        content: ev.content,
-        cost: ev.cost,
-      });
+      const call = ensureCall(ensureNode(ev.node_id), ev.call_id, ev.model);
+      call.status = ev.error ? 'error' : 'done';
+      call.cost = ev.cost;
+      call.usage = ev.usage;
+      call.errorMsg = ev.error;
+      // Authoritative final content — replaces the LAST round's content
+      // (the round with no further tool calls is the one that emitted it).
+      if (ev.content && call.rounds.length) {
+        call.rounds[call.rounds.length - 1].content = ev.content;
+      }
+    } else if (ev.type === 'tool_call_started') {
+      const t = ensureNode(ev.node_id);
+      if (ev.via === 'llm' && ev.call_id) {
+        const call = ensureCall(t, ev.call_id);
+        const r = ensureRound(call, ev.round);
+        let tc = findNestedTool(r, ev.tc_index);
+        if (!tc) {
+          tc = {
+            tc_index: ev.tc_index ?? 0,
+            round: r.round,
+            tool: ev.tool,
+            args_str: JSON.stringify(ev.args),
+            status: 'pending',
+          };
+          r.toolCalls.push(tc);
+        } else {
+          tc.tool = ev.tool || tc.tool;
+        }
+        tc.args = ev.args;
+        tc.status = 'pending';
+      }
+      // direct tool starts get matched up at finish — nothing to record yet.
     } else if (ev.type === 'tool_call_finished') {
-      ensure(ev.node_id).tool_calls.push({
-        tool: ev.tool,
-        args: ev.args,
-        result: ev.result,
-        error: ev.error,
-        via: ev.via,
-      });
+      const t = ensureNode(ev.node_id);
+      if (ev.via === 'llm' && ev.call_id) {
+        const call = ensureCall(t, ev.call_id);
+        const r = ensureRound(call, ev.round);
+        let tc = findNestedTool(r, ev.tc_index);
+        if (!tc) {
+          tc = {
+            tc_index: ev.tc_index ?? 0,
+            round: r.round,
+            tool: ev.tool,
+            args_str: JSON.stringify(ev.args),
+            status: 'pending',
+          };
+          r.toolCalls.push(tc);
+        }
+        tc.tool = ev.tool || tc.tool;
+        tc.args = ev.args;
+        tc.result = ev.result;
+        tc.error = ev.error;
+        tc.status = ev.error ? 'err' : 'ok';
+      } else {
+        t.directToolCalls.push({
+          tool: ev.tool,
+          args: ev.args,
+          result: ev.result,
+          error: ev.error,
+        });
+      }
     } else if (ev.type === 'node_finished') {
-      const t = ensure(ev.node_id);
+      const t = ensureNode(ev.node_id);
       t.status = ev.status;
       t.inputs = ev.inputs;
       t.outputs = ev.outputs;
       t.error = ev.error;
       t.duration_ms = ev.duration_ms;
       t.cost = ev.cost;
-      // Trust the finished event's full lists over what we accumulated.
-      if (ev.logs && ev.logs.length) t.logs = ev.logs as string[];
-      if (ev.llm_calls && (ev.llm_calls as any[]).length) {
-        t.llm_calls = (ev.llm_calls as any[]).map((c) => ({
-          model: c.model,
-          content: c.content,
-          cost: c.cost,
-        }));
+      // Trust accumulated logs from chunk events when present, else fall back.
+      if (t.logs.length === 0 && ev.logs && ev.logs.length) {
+        t.logs = ev.logs as string[];
       }
-      if (ev.tool_calls && (ev.tool_calls as any[]).length) {
-        t.tool_calls = (ev.tool_calls as any[]).map((c) => ({
-          tool: c.name,
-          args: c.args,
-          result: c.result,
-          error: c.error,
-          via: c.via,
-        }));
+      // Mark any still-streaming live calls as done so the spinner stops.
+      for (const c of t.llmCalls) {
+        if (c.status === 'streaming') c.status = 'done';
+        for (const r of c.rounds) {
+          for (const tc of r.toolCalls) {
+            if (tc.status === 'streaming' || tc.status === 'pending') {
+              tc.status = tc.error ? 'err' : 'ok';
+            }
+          }
+        }
       }
     }
   }
@@ -404,11 +577,14 @@ function RunTraceCard({
               {t.inputs !== undefined && <Section label="inputs" json={t.inputs} />}
               {t.outputs !== undefined && <Section label="outputs" json={t.outputs} />}
               {t.logs.length > 0 && <Section label="logs" json={t.logs} />}
-              {t.llm_calls.length > 0 && (
-                <Section label={`llm calls (${t.llm_calls.length})`} json={t.llm_calls} />
-              )}
-              {t.tool_calls.length > 0 && (
-                <Section label={`tool calls (${t.tool_calls.length})`} json={t.tool_calls} />
+              {t.llmCalls.map((c, idx) => (
+                <LLMCallCard key={c.call_id} call={c} index={idx} />
+              ))}
+              {t.directToolCalls.length > 0 && (
+                <Section
+                  label={`tool calls — direct (${t.directToolCalls.length})`}
+                  json={t.directToolCalls}
+                />
               )}
             </div>
           </details>
@@ -423,6 +599,270 @@ function RunTraceCard({
       <div className="serif" style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 10 }}>
         cost — ${cost.toFixed(4)}
       </div>
+    </div>
+  );
+}
+
+function LLMCallCard({ call, index }: { call: LiveLLMCall; index: number }) {
+  const isStreaming = call.status === 'streaming';
+  const isError = call.status === 'error';
+  const statusColor = isError
+    ? 'var(--state-err)'
+    : isStreaming
+      ? 'var(--ink-4)'
+      : 'var(--state-ok)';
+  const statusLabel = isStreaming ? 'streaming' : isError ? 'failed' : 'done';
+  const lastRoundIdx = call.rounds.length - 1;
+  const showWaiting =
+    isStreaming &&
+    call.rounds.every((r) => !r.content && !r.reasoning && r.toolCalls.length === 0);
+
+  return (
+    <div
+      className="fade-in"
+      style={{
+        margin: '10px 0 0',
+        padding: '10px 12px',
+        background: 'var(--paper)',
+        border: '1px solid var(--rule)',
+        borderRadius: 3,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+        <span className="smallcaps">llm call {index + 1}</span>
+        <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>
+          {call.model || '…'}
+        </span>
+        {call.tools.length > 0 && (
+          <span
+            className="serif"
+            style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)' }}
+          >
+            tools=[{call.tools.join(', ')}]
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <span className="smallcaps" style={{ fontSize: 9, color: statusColor }}>
+          {isStreaming && <span className="caret" style={{ marginRight: 4 }} />}
+          {statusLabel}
+          {!isStreaming && typeof call.cost === 'number' && (
+            <span style={{ marginLeft: 6, color: 'var(--ink-4)' }}>
+              · ${call.cost.toFixed(4)}
+            </span>
+          )}
+        </span>
+      </div>
+
+      {call.errorMsg && (
+        <pre
+          className="mono"
+          style={{
+            fontSize: 11,
+            color: 'var(--state-err)',
+            whiteSpace: 'pre-wrap',
+            margin: '0 0 6px',
+          }}
+        >
+          {call.errorMsg}
+        </pre>
+      )}
+
+      {call.rounds.map((r, i) => (
+        <CallRoundView
+          key={r.round}
+          round={r}
+          showRoundBadge={call.rounds.length > 1}
+          isLastRound={i === lastRoundIdx}
+          callStreaming={isStreaming}
+        />
+      ))}
+
+      {showWaiting && (
+        <div
+          className="serif"
+          style={{ fontStyle: 'italic', fontSize: 12.5, color: 'var(--ink-4)', marginTop: 4 }}
+        >
+          waiting for first token…
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallRoundView({
+  round,
+  showRoundBadge,
+  isLastRound,
+  callStreaming,
+}: {
+  round: CallRound;
+  showRoundBadge: boolean;
+  isLastRound: boolean;
+  callStreaming: boolean;
+}) {
+  // A round is "live" while the call is streaming AND this is the last round
+  // we've observed — that's where new chunks land.
+  const live = callStreaming && isLastRound;
+  // Inside a round, content appears once reasoning has stopped streaming.
+  const reasoningLive = live && !round.content && round.toolCalls.length === 0;
+  const contentLive = live && !!round.content && round.toolCalls.length === 0;
+
+  return (
+    <div style={{ marginTop: showRoundBadge ? 10 : 6 }}>
+      {showRoundBadge && (
+        <div
+          className="smallcaps"
+          style={{ fontSize: 9, color: 'var(--ink-4)', marginBottom: 4 }}
+        >
+          round {round.round + 1}
+        </div>
+      )}
+      {round.reasoning && <ReasoningBlock text={round.reasoning} live={reasoningLive} />}
+      {round.content && (
+        <div
+          className="tokens"
+          style={{ margin: '4px 0 0', color: 'var(--ink-2)', fontSize: 12 }}
+        >
+          {round.content}
+          {contentLive && <span className="caret" />}
+        </div>
+      )}
+      {round.toolCalls.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {round.toolCalls.map((tc) => (
+            <NestedToolCard key={`${tc.round}-${tc.tc_index}`} tc={tc} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReasoningBlock({ text, live }: { text: string; live: boolean }) {
+  const [open, setOpen] = useState(live);
+  useEffect(() => {
+    setOpen(live);
+  }, [live]);
+  return (
+    <div style={{ margin: '4px 0', borderLeft: '2px solid var(--rule)', paddingLeft: 10 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          background: 'transparent',
+          border: 0,
+          padding: '2px 0',
+          cursor: 'pointer',
+          color: 'var(--ink-4)',
+          fontFamily: 'var(--serif)',
+          fontStyle: 'italic',
+          fontSize: 11.5,
+        }}
+      >
+        {live ? 'thinking' : 'thought'}
+        <span>{open ? '▾' : '▸'}</span>
+        {live && <span className="caret" style={{ marginLeft: 2 }} />}
+      </button>
+      {open && (
+        <div
+          className="serif"
+          style={{
+            marginTop: 4,
+            fontStyle: 'italic',
+            fontSize: 12,
+            lineHeight: 1.55,
+            color: 'var(--ink-4)',
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NestedToolCard({ tc }: { tc: NestedToolCall }) {
+  const [expanded, setExpanded] = useState(false);
+  const status = tc.status;
+  const statusLabel =
+    status === 'ok' ? '✓ done' :
+    status === 'err' ? '× failed' :
+    status === 'pending' ? '… running' :
+    '… streaming';
+  const statusColor =
+    status === 'ok' ? 'var(--state-ok)' :
+    status === 'err' ? 'var(--state-err)' :
+    'var(--ink-4)';
+  const argsDisplay = tc.args !== undefined ? JSON.stringify(tc.args) : tc.args_str;
+
+  return (
+    <div
+      className="tool-call fade-in"
+      style={{ padding: '7px 10px', margin: '6px 0', cursor: 'pointer' }}
+      onClick={() => setExpanded((v) => !v)}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5 }}>
+        <span className="mono" style={{ color: 'var(--accent-ink)', fontSize: 10.5 }}>
+          {tc.tool || '…'}
+        </span>
+        <span
+          className="mono"
+          style={{
+            color: 'var(--ink-4)',
+            fontSize: 10.5,
+            flex: 1,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {argsDisplay || '…'}
+        </span>
+        <span className="smallcaps" style={{ color: statusColor, fontSize: 9 }}>
+          {statusLabel}
+        </span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
+          <div className="smallcaps" style={{ marginBottom: 3 }}>args</div>
+          {tc.args !== undefined ? (
+            <JsonView value={tc.args} />
+          ) : (
+            <pre
+              className="mono"
+              style={{ fontSize: 11, color: 'var(--ink-3)', whiteSpace: 'pre-wrap', margin: 0 }}
+            >
+              {tc.args_str || '…'}
+            </pre>
+          )}
+          {tc.status === 'ok' && tc.result !== undefined && (
+            <>
+              <div className="smallcaps" style={{ margin: '6px 0 3px' }}>result</div>
+              <JsonView value={tc.result} />
+            </>
+          )}
+          {tc.status === 'err' && tc.error && (
+            <>
+              <div
+                className="smallcaps"
+                style={{ margin: '6px 0 3px', color: 'var(--state-err)' }}
+              >
+                error
+              </div>
+              <pre
+                className="mono"
+                style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: 0 }}
+              >
+                {tc.error}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -497,6 +937,12 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
               <Section label="inputs" json={nr.inputs} />
               <Section label="outputs" json={nr.outputs} />
               {nr.logs.length > 0 && <Section label="logs" json={nr.logs} />}
+              {nr.llm_calls.length > 0 && (
+                <Section label={`llm calls (${nr.llm_calls.length})`} json={nr.llm_calls} />
+              )}
+              {nr.tool_calls.length > 0 && (
+                <Section label={`tool calls (${nr.tool_calls.length})`} json={nr.tool_calls} />
+              )}
             </div>
           </details>
         );

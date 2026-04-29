@@ -3,8 +3,14 @@
 The runner can pass an `on_event` callback that fires for log lines, LLM calls,
 and tool invocations as they happen — used to stream events through the
 subprocess to the websocket layer.
+
+Each ``ctx.call_llm`` invocation gets a unique ``call_id`` so the run panel can
+render concurrent calls (a node spawning threads, each calling ``call_llm``)
+as parallel streaming cards instead of mashing them together.
 """
 from __future__ import annotations
+import itertools
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -18,9 +24,10 @@ EmitFn = Callable[[dict], None]
 class _ToolsProxy:
     """Direct (non-LLM) access: ctx.tools.shell(command="..."), etc."""
 
-    def __init__(self, recorder: list[dict], on_event: EmitFn):
+    def __init__(self, recorder: list[dict], on_event: EmitFn, lock: threading.Lock):
         self._recorder = recorder
         self._on_event = on_event
+        self._lock = lock
 
     def __getattr__(self, name: str):
         fn = REGISTRY.get(name)
@@ -33,7 +40,8 @@ class _ToolsProxy:
             try:
                 result = fn(**kwargs)
                 entry["result"] = result
-                self._recorder.append(entry)
+                with self._lock:
+                    self._recorder.append(entry)
                 self._on_event(
                     {
                         "type": "tool_call_finished",
@@ -47,7 +55,8 @@ class _ToolsProxy:
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 entry["error"] = err
-                self._recorder.append(entry)
+                with self._lock:
+                    self._recorder.append(entry)
                 self._on_event(
                     {
                         "type": "tool_call_finished",
@@ -77,11 +86,17 @@ class Ctx:
         self.logs: list[str] = []
         self.llm_calls: list[dict] = []
         self.tool_calls: list[dict] = []
-        self.tools = _ToolsProxy(self.tool_calls, self._on_event)
+        self._lock = threading.Lock()
+        self._call_counter = itertools.count(1)
+        self.tools = _ToolsProxy(self.tool_calls, self._on_event, self._lock)
+
+    def _next_call_id(self) -> str:
+        return f"call-{next(self._call_counter)}"
 
     def log(self, msg) -> None:
         s = str(msg)
-        self.logs.append(s)
+        with self._lock:
+            self.logs.append(s)
         self._on_event({"type": "log", "msg": s})
 
     def call_llm(self, model: str | None = None, prompt=None, tools=None, **opts) -> dict:
@@ -91,10 +106,40 @@ class Ctx:
         if self._allowed_tools is not None and tools:
             tools = [t for t in tools if t in self._allowed_tools]
 
-        self._on_event({"type": "llm_call_started", "model": m, "tools": tools or []})
-        result = llm_mod.call_llm(m, prompt, tools=tools, **opts)
+        call_id = self._next_call_id()
+        self._on_event(
+            {
+                "type": "llm_call_started",
+                "call_id": call_id,
+                "model": m,
+                "tools": tools or [],
+            }
+        )
+        try:
+            result = llm_mod.call_llm(
+                m,
+                prompt,
+                tools=tools,
+                on_event=self._on_event,
+                call_id=call_id,
+                **opts,
+            )
+        except Exception as e:
+            self._on_event(
+                {
+                    "type": "llm_call_finished",
+                    "call_id": call_id,
+                    "model": m,
+                    "content": "",
+                    "usage": {},
+                    "cost": 0.0,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+            raise
 
         record = {
+            "call_id": call_id,
             "model": m,
             "prompt": prompt if isinstance(prompt, str) else "<messages>",
             "tools": tools or [],
@@ -103,30 +148,22 @@ class Ctx:
             "usage": result.get("usage", {}),
             "cost": result.get("cost", 0.0),
         }
-        self.llm_calls.append(record)
-
-        for tc in result.get("tool_calls_made", []):
-            self.tool_calls.append(
-                {
-                    "name": tc.get("name"),
-                    "args": tc.get("args"),
-                    "result": tc.get("result"),
-                    "via": "llm",
-                }
-            )
-            self._on_event(
-                {
-                    "type": "tool_call_finished",
-                    "tool": tc.get("name"),
-                    "args": tc.get("args"),
-                    "result": tc.get("result"),
-                    "via": "llm",
-                }
-            )
+        with self._lock:
+            self.llm_calls.append(record)
+            for tc in result.get("tool_calls_made", []):
+                self.tool_calls.append(
+                    {
+                        "name": tc.get("name"),
+                        "args": tc.get("args"),
+                        "result": tc.get("result"),
+                        "via": "llm",
+                    }
+                )
 
         self._on_event(
             {
                 "type": "llm_call_finished",
+                "call_id": call_id,
                 "model": m,
                 "content": record["content"],
                 "usage": record["usage"],

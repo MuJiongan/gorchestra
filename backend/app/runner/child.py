@@ -10,14 +10,27 @@ Event types (all on a single line, JSON):
   {"type": "run_started",  "node_count": N, "order": [...]}
   {"type": "node_started", "node_id": "...", "inputs": {...}}
   {"type": "log",          "node_id": "...", "msg": "..."}
-  {"type": "llm_call_started",  "node_id": "...", "model": "...", "tools": [...]}
-  {"type": "llm_call_finished", "node_id": "...", "model": "...", "content": "...", "usage": {...}, "cost": 0.0}
-  {"type": "tool_call_started",  "node_id": "...", "tool": "...", "args": {...}, "via": "direct"|"llm"}
-  {"type": "tool_call_finished", "node_id": "...", "tool": "...", "args": {...}, "result": ..., "via": ...}
+  {"type": "llm_call_started",  "node_id": "...", "call_id": "...", "model": "...", "tools": [...]}
+  {"type": "llm_round_started", "node_id": "...", "call_id": "...", "round": N}
+  {"type": "llm_call_chunk",    "node_id": "...", "call_id": "...", "round": N,
+                                "kind": "content"|"reasoning"|"tool_args",
+                                "delta": "...", "tc_index"?: N, "tool"?: "..."}
+  {"type": "llm_call_finished", "node_id": "...", "call_id": "...", "model": "...",
+                                "content": "...", "usage": {...}, "cost": 0.0}
+  {"type": "tool_call_started",  "node_id": "...", "tool": "...", "args": {...},
+                                 "via": "direct"|"llm",
+                                 "call_id"?: "...", "tc_index"?: N, "round"?: N}
+  {"type": "tool_call_finished", "node_id": "...", "tool": "...", "args": {...},
+                                 "result": ..., "via": ...,
+                                 "call_id"?: "...", "tc_index"?: N, "round"?: N}
   {"type": "node_finished", "node_id": "...", "status": "...", "inputs": {...}, "outputs": {...},
                             "logs": [...], "llm_calls": [...], "tool_calls": [...],
                             "error": null|"...", "duration_ms": N, "cost": 0.0}
   {"type": "run_finished",  "status": "...", "outputs": {...}, "error": null|"...", "total_cost": 0.0}
+
+A node may invoke ``ctx.call_llm`` from multiple threads concurrently; each
+invocation gets its own ``call_id`` and the stdout write below is locked so
+the per-line JSON frames don't get interleaved.
 """
 from __future__ import annotations
 import json
@@ -261,12 +274,19 @@ def main() -> None:
     except KeyboardInterrupt:
         shared["cancel_reason"] = "cancelled by user"
         terminate_event.set()
-    finally:
-        pool.shutdown(wait=True)
+
+    cancelled = shared["cancel_reason"] is not None
+    # On cancel, don't wait for in-flight node threads — they may be blocked
+    # in `ctx.call_llm` (httpx with no timeout, deliberately, so streams don't
+    # truncate). Python signals are delivered to the main thread only, so a
+    # node thread won't see SIGTERM. Waiting here means the user has to click
+    # cancel a second time to deliver another SIGTERM that finally kills the
+    # process. Skip the wait and forcibly exit below.
+    pool.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
     final_outputs = node_outputs.get(output_node_id, {}) if output_node_id else {}
 
-    if shared["cancel_reason"] is not None:
+    if cancelled:
         _emit(
             {
                 "type": "run_finished",
@@ -276,7 +296,11 @@ def main() -> None:
                 "total_cost": shared["total_cost"],
             }
         )
-        return
+        # Force-exit — any node thread still blocked in an LLM stream would
+        # otherwise keep this subprocess alive and the parent would never see
+        # EOF on stdout. _exit skips finalizers but stdout was just flushed
+        # by _emit so the parent has the cancelled event in hand.
+        os._exit(0)
 
     if shared["error"] is not None:
         _emit(

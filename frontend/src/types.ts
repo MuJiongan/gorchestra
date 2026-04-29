@@ -82,18 +82,44 @@ export interface Settings {
 
 export type ToolVia = 'direct' | 'llm';
 
+export type LLMChunkKind = 'content' | 'reasoning' | 'tool_args';
+
 export type RunEvent =
   | { type: 'run_started'; node_count: number; order: string[] }
   | { type: 'node_started'; node_id: string; inputs: Record<string, unknown> }
   | { type: 'log'; node_id: string; msg: string }
-  | { type: 'llm_call_started'; node_id: string; model: string; tools: string[] }
+  | {
+      type: 'llm_call_started';
+      node_id: string;
+      call_id: string;
+      model: string;
+      tools: string[];
+    }
+  | {
+      type: 'llm_round_started';
+      node_id: string;
+      call_id: string;
+      round: number;
+    }
+  | {
+      type: 'llm_call_chunk';
+      node_id: string;
+      call_id: string;
+      kind: LLMChunkKind;
+      round: number;
+      delta: string;
+      tc_index?: number;
+      tool?: string;
+    }
   | {
       type: 'llm_call_finished';
       node_id: string;
+      call_id: string;
       model: string;
       content: string;
       usage: Record<string, unknown>;
       cost: number;
+      error?: string;
     }
   | {
       type: 'tool_call_started';
@@ -101,6 +127,9 @@ export type RunEvent =
       tool: string;
       args: Record<string, unknown>;
       via: ToolVia;
+      call_id?: string;
+      tc_index?: number;
+      round?: number;
     }
   | {
       type: 'tool_call_finished';
@@ -110,6 +139,9 @@ export type RunEvent =
       result?: unknown;
       error?: string;
       via: ToolVia;
+      call_id?: string;
+      tc_index?: number;
+      round?: number;
     }
   | {
       type: 'node_finished';

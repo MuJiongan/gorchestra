@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useMemo } from 'react';
+import { Fragment, useCallback, useMemo, useState } from 'react';
 import {
   ReactFlow, ReactFlowProvider, Controls,
   Handle, Position,
@@ -38,10 +38,9 @@ function StateDot({ state = 'idle' }: { state?: string }) {
 
 const NODE_W = 240;
 
-// Port section — handles attach to the card's top/bottom edge, labels render
-// inside the card as a vertical list (one row per port). Listing one-per-row
-// scales without overlap regardless of port count; the handles still spread
-// horizontally along the edge so vertical edges land on distinct columns.
+// Port section — handles attach to the card's top/bottom edge. Labels are
+// rendered as absolutely-positioned tooltips next to each dot and only fade
+// in on hover, so they don't reserve any space in the card layout.
 function PortSection({
   ports,
   side,
@@ -51,58 +50,51 @@ function PortSection({
 }) {
   if (ports.length === 0) return null;
   const isTop = side === 'top';
+  const [hovered, setHovered] = useState<string | null>(null);
   return (
     <Fragment>
-      {/* Handles: dots on the card's top/bottom edge, evenly spread by column. */}
       {ports.map((p, i) => {
         const xPct = ((i + 0.5) / ports.length) * 100;
+        const dim = isTop && !p.required;
+        const visible = hovered === p.name;
         return (
-          <Handle
-            key={p.name}
-            type={isTop ? 'target' : 'source'}
-            position={isTop ? Position.Top : Position.Bottom}
-            id={p.name}
-            style={{
-              [isTop ? 'top' : 'bottom']: -5,
-              left: `${xPct}%`,
-              transform: 'translateX(-50%)',
-              position: 'absolute',
-            }}
-          />
-        );
-      })}
-      {/* Label list: one port per row, full-width with ellipsis on overflow.
-          No border — the font/color shift is enough to read it as metadata
-          rather than another titled section. */}
-      <div
-        style={{
-          padding: isTop ? '8px 14px 0' : '0 14px 10px',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        {ports.map((p) => {
-          const dim = isTop && !p.required;
-          return (
+          <Fragment key={p.name}>
+            <Handle
+              type={isTop ? 'target' : 'source'}
+              position={isTop ? Position.Top : Position.Bottom}
+              id={p.name}
+              onMouseEnter={() => setHovered(p.name)}
+              onMouseLeave={() => setHovered((h) => (h === p.name ? null : h))}
+              style={{
+                [isTop ? 'top' : 'bottom']: -5,
+                left: `${xPct}%`,
+                transform: 'translateX(-50%)',
+                position: 'absolute',
+              }}
+            />
             <div
-              key={p.name}
               title={dim ? `${p.name} (optional)` : p.name}
               style={{
+                position: 'absolute',
+                [isTop ? 'bottom' : 'top']: 'calc(100% + 6px)',
+                left: `${xPct}%`,
+                transform: 'translateX(-50%)',
                 fontFamily: 'var(--mono)',
                 fontSize: 10.5,
                 color: dim ? 'var(--ink-4)' : 'var(--ink-3)',
                 lineHeight: 1.5,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
-                textAlign: isTop ? 'left' : 'right',
+                pointerEvents: 'none',
+                opacity: visible ? 1 : 0,
+                transition: 'opacity .15s',
+                zIndex: 10,
               }}
             >
               {p.name}
             </div>
-          );
-        })}
-      </div>
+          </Fragment>
+        );
+      })}
     </Fragment>
   );
 }

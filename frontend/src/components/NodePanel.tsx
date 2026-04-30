@@ -13,7 +13,7 @@ const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
   skipped: 'skipped',
 };
 
-const TOOL_NAMES = ['shell', 'fetch', 'web_search'];
+const TOOL_NAMES = ['shell', 'web_search', 'web_fetch'];
 
 interface Props {
   node: WFNode;

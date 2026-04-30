@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { Fragment, useCallback, useMemo } from 'react';
 import {
   ReactFlow, ReactFlowProvider, Controls,
   Handle, Position,
@@ -38,12 +38,80 @@ function StateDot({ state = 'idle' }: { state?: string }) {
 
 const NODE_W = 240;
 
+// Port section — handles attach to the card's top/bottom edge, labels render
+// inside the card as a vertical list (one row per port). Listing one-per-row
+// scales without overlap regardless of port count; the handles still spread
+// horizontally along the edge so vertical edges land on distinct columns.
+function PortSection({
+  ports,
+  side,
+}: {
+  ports: IOPort[];
+  side: 'top' | 'bottom';
+}) {
+  if (ports.length === 0) return null;
+  const isTop = side === 'top';
+  return (
+    <Fragment>
+      {/* Handles: dots on the card's top/bottom edge, evenly spread by column. */}
+      {ports.map((p, i) => {
+        const xPct = ((i + 0.5) / ports.length) * 100;
+        return (
+          <Handle
+            key={p.name}
+            type={isTop ? 'target' : 'source'}
+            position={isTop ? Position.Top : Position.Bottom}
+            id={p.name}
+            style={{
+              [isTop ? 'top' : 'bottom']: -5,
+              left: `${xPct}%`,
+              transform: 'translateX(-50%)',
+              position: 'absolute',
+            }}
+          />
+        );
+      })}
+      {/* Label list: one port per row, full-width with ellipsis on overflow.
+          No border — the font/color shift is enough to read it as metadata
+          rather than another titled section. */}
+      <div
+        style={{
+          padding: isTop ? '8px 14px 0' : '0 14px 10px',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {ports.map((p) => {
+          const dim = isTop && !p.required;
+          return (
+            <div
+              key={p.name}
+              title={dim ? `${p.name} (optional)` : p.name}
+              style={{
+                fontFamily: 'var(--mono)',
+                fontSize: 10.5,
+                color: dim ? 'var(--ink-4)' : 'var(--ink-3)',
+                lineHeight: 1.5,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                textAlign: isTop ? 'left' : 'right',
+              }}
+            >
+              {p.name}
+            </div>
+          );
+        })}
+      </div>
+    </Fragment>
+  );
+}
+
 function NodeBlock({ data, selected }: NodeProps) {
   const d = data as NodeData;
   const ins = d.inputs || [];
   const outs = d.outputs || [];
   const role = d.isInput ? 'input' : d.isOutput ? 'output' : null;
-  const portRowCount = Math.max(ins.length, outs.length);
 
   return (
     <div
@@ -53,12 +121,15 @@ function NodeBlock({ data, selected }: NodeProps) {
         width: NODE_W,
       }}
     >
+      {/* inputs — handles on the top edge, labels listed inside the card. */}
+      <PortSection ports={ins} side="top" />
+
       {/* header — name on its own line so a long name doesn't push the role
           badge or tools row out of the card. */}
       <div
         style={{
           padding: '10px 14px 8px',
-          borderBottom: '1px solid var(--rule-2)',
+          borderBottom: d.description ? '1px solid var(--rule-2)' : undefined,
           overflow: 'hidden',
         }}
       >
@@ -117,7 +188,7 @@ function NodeBlock({ data, selected }: NodeProps) {
       {d.description && (
         <div
           style={{
-            padding: '6px 14px 8px',
+            padding: '6px 14px 10px',
             fontFamily: 'var(--serif)',
             fontStyle: 'italic',
             fontSize: 12.5,
@@ -129,116 +200,8 @@ function NodeBlock({ data, selected }: NodeProps) {
         </div>
       )}
 
-      {/* ports — paired rows, one per (input, output) by index. each side
-          gets equal share with ellipsis on long names. */}
-      {portRowCount > 0 && (
-        <div style={{ padding: '6px 14px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {Array.from({ length: portRowCount }).map((_, i) => {
-            const inp = ins[i];
-            const out = outs[i];
-            return (
-              <div
-                key={i}
-                style={{
-                  position: 'relative',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 10.5,
-                  fontFamily: 'var(--mono)',
-                  minHeight: 14,
-                }}
-              >
-                {/* left side: input port (or empty placeholder) */}
-                {inp ? (
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 4,
-                      flex: '1 1 0',
-                      minWidth: 0,
-                    }}
-                  >
-                    <Handle
-                      type="target"
-                      position={Position.Left}
-                      id={inp.name}
-                      style={{
-                        top: '50%',
-                        left: -19,
-                        transform: 'translateY(-50%)',
-                        position: 'absolute',
-                      }}
-                    />
-                    <span
-                      title={inp.name}
-                      style={{
-                        color: inp.required ? 'var(--ink-2)' : 'var(--ink-4)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        minWidth: 0,
-                      }}
-                    >
-                      {inp.name}
-                    </span>
-                    {!inp.required && (
-                      <span className="smallcaps" style={{ fontSize: 8.5, flex: 'none' }}>
-                        opt
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ flex: '1 1 0', minWidth: 0 }} />
-                )}
-
-                {/* right side: output port (or empty) */}
-                {out ? (
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 4,
-                      flex: '1 1 0',
-                      minWidth: 0,
-                      justifyContent: 'flex-end',
-                    }}
-                  >
-                    <span
-                      title={out.name}
-                      style={{
-                        color: 'var(--ink-2)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        minWidth: 0,
-                        textAlign: 'right',
-                      }}
-                    >
-                      {out.name}
-                    </span>
-                    <Handle
-                      type="source"
-                      position={Position.Right}
-                      id={out.name}
-                      style={{
-                        top: '50%',
-                        right: -19,
-                        left: 'auto',
-                        transform: 'translateY(-50%)',
-                        position: 'absolute',
-                      }}
-                    />
-                  </div>
-                ) : (
-                  <div style={{ flex: '1 1 0' }} />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* outputs — handles on the bottom edge, labels listed inside the card. */}
+      <PortSection ports={outs} side="bottom" />
     </div>
   );
 }
@@ -285,27 +248,25 @@ function CanvasLegend() {
 // — a fixed Y_GAP would let tall nodes (long descriptions, many ports)
 // overlap into the next layer.
 function estimateNodeHeight(n: WorkflowDetail['nodes'][number]): number {
+  let h = 0;
+  // Inputs section: padding 8/14/0 + N rows at line-height 1.5 * 10.5 ≈ 16px.
+  if (n.inputs.length > 0) h += 8 + n.inputs.length * 16;
   // Header: padding 10/14/8 + name line at fontSize 12 (~16px line box).
-  let h = 10 + 16 + 8;
+  h += 10 + 16 + 8;
   if (n.config?.tools_enabled?.length) {
     h += 4 /* marginTop */ + 11 /* tools row line box */;
   }
-  h += 1; // border-bottom on header
-
   if (n.description) {
-    // Description block: padding 6/14/8, fontSize 12.5, lineHeight 1.4.
+    h += 1; // header bottom border (only present when description follows)
+    // Description block: padding 6/14/10, fontSize 12.5, lineHeight 1.4.
     // Width inside padding ≈ 240 - 14*2 = 212px; serif italic averages
     // ~6.5 px/char, so ~32 chars per line is a reasonable estimate.
     const charsPerLine = 32;
     const lines = Math.max(1, Math.ceil(n.description.length / charsPerLine));
-    h += 6 + lines * Math.ceil(12.5 * 1.4) + 8;
+    h += 6 + lines * Math.ceil(12.5 * 1.4) + 10;
   }
-
-  const portCount = Math.max(n.inputs.length, n.outputs.length);
-  if (portCount > 0) {
-    // Ports block: padding 6/14/12, gap 6 between rows, minHeight 14 per row.
-    h += 6 + portCount * 14 + Math.max(0, portCount - 1) * 6 + 12;
-  }
+  // Outputs section: N rows + bottom padding 10.
+  if (n.outputs.length > 0) h += n.outputs.length * 16 + 10;
   return Math.ceil(h);
 }
 

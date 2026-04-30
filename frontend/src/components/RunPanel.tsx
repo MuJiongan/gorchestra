@@ -4,6 +4,7 @@ import type {
 } from '../types';
 import { api } from '../api';
 import { JsonView } from './JsonView';
+import { Markdown } from './Markdown';
 
 interface Props {
   workflow: WorkflowDetail;
@@ -494,6 +495,66 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   );
 }
 
+// Renders the final output of a run as directly as possible.
+//
+// The backend emits `outputs` as a port-name → value dict (one entry per
+// output port on the output node). When there's a single port whose value
+// is a string we unwrap it and show the prose/markdown straight; readers
+// shouldn't have to expand a JSON tree to read the model's answer. Anything
+// richer falls back to the JsonView used elsewhere.
+const MD_HINTS_FO =
+  /(^|\n)\s*(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|```)|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)/m;
+
+function FinalOutput({ outputs }: { outputs: Record<string, unknown> }) {
+  const keys = Object.keys(outputs);
+  const single = keys.length === 1 ? outputs[keys[0]] : undefined;
+
+  if (typeof single === 'string') {
+    const isMd = single.length >= 12 && MD_HINTS_FO.test(single);
+    return (
+      <div
+        style={{
+          padding: '10px 12px',
+          background: 'var(--paper)',
+          border: '1px solid var(--rule-2)',
+          borderRadius: 3,
+          maxHeight: 480,
+          overflow: 'auto',
+        }}
+      >
+        {isMd ? (
+          <Markdown>{single}</Markdown>
+        ) : (
+          <div
+            className="serif"
+            style={{
+              fontSize: 13,
+              lineHeight: 1.55,
+              color: 'var(--ink)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {single}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return <JsonView value={outputs} />;
+}
+
+function FinalOutputBlock({ outputs }: { outputs: Record<string, unknown> }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="smallcaps" style={{ marginBottom: 6, color: 'var(--state-ok)' }}>
+        final output
+      </div>
+      <FinalOutput outputs={outputs} />
+    </div>
+  );
+}
+
 function RunTraceCard({
   workflow, runId, status, error, cost, outputs, traces,
 }: {
@@ -505,6 +566,7 @@ function RunTraceCard({
   outputs: Record<string, unknown> | null;
   traces: NodeTrace[];
 }) {
+  const hasFinal = status === 'success' && outputs && Object.keys(outputs).length > 0;
   return (
     <div
       style={{
@@ -543,59 +605,69 @@ function RunTraceCard({
           {error}
         </pre>
       )}
-      {traces.map((t) => {
-        const nodeName = workflow.nodes.find((n) => n.id === t.node_id)?.name ?? t.node_id;
-        return (
-          <details key={t.node_id} style={{ marginBottom: 6 }} open={t.status === 'running' || t.status === 'error'}>
-            <summary
-              style={{
-                cursor: 'pointer',
-                padding: '6px 0',
-                borderBottom: '1px solid var(--rule-2)',
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 8,
-              }}
-            >
-              <span className={`node-state-dot ${STATE_CLASS[t.status]}`} />
-              <span className="mono" style={{ fontSize: 11.5 }}>{nodeName}</span>
-              <span style={{ flex: 1 }} />
-              <span className="smallcaps" style={{ fontSize: 9 }}>
-                {t.status}
-                {typeof t.duration_ms === 'number' ? ` · ${t.duration_ms}ms` : ''}
-              </span>
-            </summary>
-            <div style={{ padding: '8px 0' }}>
-              {t.error && (
-                <pre
-                  className="mono"
-                  style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+      {hasFinal && outputs && <FinalOutputBlock outputs={outputs} />}
+      <details style={{ marginTop: hasFinal ? 4 : 0 }} open={!hasFinal}>
+        <summary
+          className="smallcaps"
+          style={{
+            cursor: 'pointer',
+            padding: '4px 0',
+            color: 'var(--ink-3)',
+            fontSize: 10,
+          }}
+        >
+          trace · {traces.length} {traces.length === 1 ? 'node' : 'nodes'}
+        </summary>
+        <div style={{ marginTop: 6 }}>
+          {traces.map((t) => {
+            const nodeName = workflow.nodes.find((n) => n.id === t.node_id)?.name ?? t.node_id;
+            return (
+              <details key={t.node_id} style={{ marginBottom: 6 }} open={t.status === 'running' || t.status === 'error'}>
+                <summary
+                  style={{
+                    cursor: 'pointer',
+                    padding: '6px 0',
+                    borderBottom: '1px solid var(--rule-2)',
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: 8,
+                  }}
                 >
-                  {t.error}
-                </pre>
-              )}
-              {t.inputs !== undefined && <Section label="inputs" json={t.inputs} />}
-              {t.outputs !== undefined && <Section label="outputs" json={t.outputs} />}
-              {t.logs.length > 0 && <Section label="logs" json={t.logs} />}
-              {t.llmCalls.map((c, idx) => (
-                <LLMCallCard key={c.call_id} call={c} index={idx} />
-              ))}
-              {t.directToolCalls.length > 0 && (
-                <Section
-                  label={`tool calls — direct (${t.directToolCalls.length})`}
-                  json={t.directToolCalls}
-                />
-              )}
-            </div>
-          </details>
-        );
-      })}
-      {status === 'success' && outputs && (
-        <div style={{ marginTop: 12 }}>
-          <div className="smallcaps" style={{ marginBottom: 4 }}>final output</div>
-          <JsonView value={outputs} />
+                  <span className={`node-state-dot ${STATE_CLASS[t.status]}`} />
+                  <span className="mono" style={{ fontSize: 11.5 }}>{nodeName}</span>
+                  <span style={{ flex: 1 }} />
+                  <span className="smallcaps" style={{ fontSize: 9 }}>
+                    {t.status}
+                    {typeof t.duration_ms === 'number' ? ` · ${t.duration_ms}ms` : ''}
+                  </span>
+                </summary>
+                <div style={{ padding: '8px 0' }}>
+                  {t.error && (
+                    <pre
+                      className="mono"
+                      style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+                    >
+                      {t.error}
+                    </pre>
+                  )}
+                  {t.inputs !== undefined && <Section label="inputs" json={t.inputs} />}
+                  {t.outputs !== undefined && <Section label="outputs" json={t.outputs} />}
+                  {t.logs.length > 0 && <Section label="logs" json={t.logs} />}
+                  {t.llmCalls.map((c, idx) => (
+                    <LLMCallCard key={c.call_id} call={c} index={idx} />
+                  ))}
+                  {t.directToolCalls.length > 0 && (
+                    <Section
+                      label={`tool calls — direct (${t.directToolCalls.length})`}
+                      json={t.directToolCalls}
+                    />
+                  )}
+                </div>
+              </details>
+            );
+          })}
         </div>
-      )}
+      </details>
       <div className="serif" style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 10 }}>
         cost — ${cost.toFixed(4)}
       </div>
@@ -868,6 +940,7 @@ function NestedToolCard({ tc }: { tc: NestedToolCall }) {
 }
 
 function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: Run }) {
+  const hasFinal = run.status === 'success' && run.outputs && Object.keys(run.outputs).length > 0;
   return (
     <div
       style={{
@@ -904,6 +977,20 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
           {run.error}
         </pre>
       )}
+      {hasFinal && <FinalOutputBlock outputs={run.outputs} />}
+      <details open={!hasFinal} style={{ marginTop: hasFinal ? 4 : 0 }}>
+        <summary
+          className="smallcaps"
+          style={{
+            cursor: 'pointer',
+            padding: '4px 0',
+            color: 'var(--ink-3)',
+            fontSize: 10,
+          }}
+        >
+          trace · {run.node_runs.length} {run.node_runs.length === 1 ? 'node' : 'nodes'}
+        </summary>
+        <div style={{ marginTop: 6 }}>
       {run.node_runs.map((nr) => {
         const nodeName = workflow.nodes.find((n) => n.id === nr.node_id)?.name ?? nr.node_id;
         return (
@@ -947,6 +1034,8 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
           </details>
         );
       })}
+        </div>
+      </details>
       <div className="serif" style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 10 }}>
         cost — ${run.total_cost.toFixed(4)}
       </div>

@@ -43,7 +43,7 @@ A complete graph has every non-trivial node wired into the data flow, with input
 
 # node code contract
 
-Every node defines exactly:
+Every node defines a `run(inputs, ctx)` function. Top-level `import`s and small helper functions alongside `run` are fine — the whole code blob is `exec`'d into a fresh namespace per run, so reach for `json`, `re`, `pathlib`, etc. when they're cleaner than routing through an LLM.
 
 ```python
 def run(inputs, ctx):
@@ -97,6 +97,24 @@ def run(inputs, ctx):
         "support_path": inputs["email"] if label == "support" else None,
         "sales_path":   inputs["email"] if label == "sales"   else None,
     }
+```
+
+# dynamic lists = loop inside one node
+
+when an upstream node compiles a list whose length isn't known at design time — an explorer returns a variable file set, a search returns hits, a classifier returns labels — the downstream node takes that list as a single input and iterates inside `run()`. there's no `foreach` primitive at the graph level on purpose: *static* fan-out lives across nodes (named branches via null propagation); *dynamic* fan-out lives inside one node. this is the right pattern, not a workaround — reach for it whenever the width is data-driven.
+
+call `ctx.call_llm` per item if a step needs an LLM, accumulate into a list output, and `ctx.log(...)` per iteration so progress shows in the run panel.
+
+## example: a node that processes each item from an upstream list
+
+```python
+def run(inputs, ctx):
+    summaries = []
+    for item in inputs["items"]:
+        ctx.log(f"summarising {item}")
+        r = ctx.call_llm(model="", prompt=f"summarise: {item}")
+        summaries.append(r["content"])
+    return {"summaries": summaries}
 ```
 
 # decompose, then branch

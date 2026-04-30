@@ -101,19 +101,22 @@ def run(inputs, ctx):
 
 # dynamic lists = loop inside one node
 
-when an upstream node compiles a list whose length isn't known at design time — an explorer returns a variable file set, a search returns hits, a classifier returns labels — the downstream node takes that list as a single input and iterates inside `run()`. there's no `foreach` primitive at the graph level on purpose: *static* fan-out lives across nodes (named branches via null propagation); *dynamic* fan-out lives inside one node. this is the right pattern, not a workaround — reach for it whenever the width is data-driven.
+when an upstream node compiles a list whose length isn't known at design time — a parser returns a list of records, a search returns hits, a classifier returns labels — the downstream node takes that list as a single input and processes it inside `run()`. there's no `foreach` primitive at the graph level on purpose: *static* fan-out lives across nodes (named branches via null propagation); *dynamic* fan-out lives inside one node. this is the right pattern, not a workaround — reach for it whenever the width is data-driven.
 
-call `ctx.call_llm` per item if a step needs an LLM, accumulate into a list output, and `ctx.log(...)` per iteration so progress shows in the run panel.
+run the per-item llm calls *in parallel*, not in a sequential `for` loop. `ctx.call_llm` is thread-safe, every concurrent call gets its own streaming card in the run panel, and N sequential round-trips is latency you don't have to pay. use `ctx.log(...)` per item so progress is visible, and cap the worker count so the model provider doesn't rate-limit you.
 
-## example: a node that processes each item from an upstream list
+## example: a node that processes each item in parallel
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
+
 def run(inputs, ctx):
-    summaries = []
-    for item in inputs["items"]:
+    items = inputs["items"]
+    def _one(item):
         ctx.log(f"summarising {item}")
-        r = ctx.call_llm(model="", prompt=f"summarise: {item}")
-        summaries.append(r["content"])
+        return ctx.call_llm(model="", prompt=f"summarise: {item}")["content"]
+    with ThreadPoolExecutor(max_workers=min(8, len(items) or 1)) as pool:
+        summaries = list(pool.map(_one, items))
     return {"summaries": summaries}
 ```
 
@@ -128,6 +131,7 @@ plan the graph before mutating. break the request into focused steps, and branch
 - prefer several focused nodes over one giant node.
 - leave `model=""` for nodes that don't call an LLM, or to use the user's default.
 - only enable tools a node actually uses. `shell` is dangerous — opt in deliberately.
+- *parallelise independent `ctx.call_llm` calls* — `ctx` is thread-safe, the run panel renders concurrent calls as parallel cards, and a sequential loop of N llm calls is almost always wrong. applies to loops over lists *and* to nodes that just happen to make multiple unrelated calls.
 - *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`), `inputs`/`outputs`, and — for any node that calls `ctx.call_llm` — the matching `tools_enabled`. nodes are not placeholders to fill in later.
 
 # your tool surface

@@ -9,6 +9,7 @@ Without ``on_event`` it falls back to a non-streaming POST — kept for any
 caller that doesn't need live progress.
 """
 from __future__ import annotations
+import itertools
 import json
 import os
 from typing import Callable, Iterator
@@ -110,7 +111,6 @@ def call_llm(
     model: str,
     prompt,
     tools: list[str] | None = None,
-    max_turns: int = 8,
     on_event: Callable[[dict], None] | None = None,
     call_id: str | None = None,
     **opts,
@@ -122,7 +122,6 @@ def call_llm(
         model:    OpenRouter model id (e.g. "anthropic/claude-sonnet-4.5").
         prompt:   str or list of messages [{role, content}].
         tools:    list of tool names exposed to the LLM (subset of REGISTRY keys).
-        max_turns: cap on agent-loop turns when tools are provided.
         on_event: optional callback for streaming events. When provided, the
                   call streams from OpenRouter and emits ``llm_call_chunk`` and
                   ``tool_call_started``/``tool_call_finished`` events tagged
@@ -161,7 +160,11 @@ def call_llm(
         on_event(ev)
 
     with httpx.Client(timeout=None) as client:
-        for round_idx in range(max_turns):
+        # No turn cap — the agent loop runs until the LLM produces a final
+        # message with no tool calls. A node code that hangs is the user's
+        # cancel button to address; matches the orchestrator runtime model
+        # (see app/runner/child.py for the SIGTERM → KeyboardInterrupt path).
+        for round_idx in itertools.count():
             payload: dict = {
                 "model": model,
                 "messages": messages,
@@ -295,11 +298,3 @@ def call_llm(
                         "round": round_idx,
                     }
                 )
-
-    return {
-        "content": "[max turns reached]",
-        "messages": messages,
-        "tool_calls_made": tool_calls_made,
-        "usage": total_usage,
-        "cost": total_cost,
-    }

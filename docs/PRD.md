@@ -87,8 +87,8 @@ Execution:
 
 ### 5.3 `call_llm`
 - Single function over OpenRouter.
-- Signature: `call_llm(model: str, prompt: str | messages, tools: list[str] = [], max_turns: int = 8, **opts) -> dict`.
-- When `tools` is non-empty, runs an agent loop: LLM → tool calls → tool results → LLM, until the LLM stops calling tools or hits `max_turns`.
+- Signature: `call_llm(model: str, prompt: str | messages, tools: list[str] = [], **opts) -> dict`.
+- When `tools` is non-empty, runs an agent loop: LLM → tool calls → tool results → LLM, until the LLM stops calling tools. There's no turn cap — a runaway loop is a cancel-button concern, same as any other hung node.
 - **Not** token-streaming inside nodes in v1 — it returns the full assembled response. The runner emits `llm_call_started` / `llm_call_finished` events around each call so the run panel shows progress at the call granularity.
 - Captures cost + token counts from OpenRouter (requests `usage.include = true` so `usage.cost` is populated).
 

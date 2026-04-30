@@ -43,7 +43,7 @@ A complete graph has every non-trivial node wired into the data flow, with input
 
 # node code contract
 
-Every node defines exactly:
+Every node defines a `run(inputs, ctx)` function. Top-level `import`s and small helper functions alongside `run` are fine — the whole code blob is `exec`'d into a fresh namespace per run, so reach for `json`, `re`, `pathlib`, etc. when they're cleaner than routing through an LLM.
 
 ```python
 def run(inputs, ctx):
@@ -99,6 +99,27 @@ def run(inputs, ctx):
     }
 ```
 
+# dynamic lists = loop inside one node
+
+when an upstream node compiles a list whose length isn't known at design time — a parser returns a list of records, a search returns hits, a classifier returns labels — the downstream node takes that list as a single input and processes it inside `run()`. there's no `foreach` primitive at the graph level on purpose: *static* fan-out lives across nodes (named branches via null propagation); *dynamic* fan-out lives inside one node. this is the right pattern, not a workaround — reach for it whenever the width is data-driven.
+
+run the per-item llm calls *in parallel*, not in a sequential `for` loop. `ctx.call_llm` is thread-safe, every concurrent call gets its own streaming card in the run panel, and N sequential round-trips is latency you don't have to pay. use `ctx.log(...)` per item so progress is visible, and cap the worker count so the model provider doesn't rate-limit you.
+
+## example: a node that processes each item in parallel
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+def run(inputs, ctx):
+    items = inputs["items"]
+    def _one(item):
+        ctx.log(f"summarising {item}")
+        return ctx.call_llm(model="", prompt=f"summarise: {item}")["content"]
+    with ThreadPoolExecutor(max_workers=min(8, len(items) or 1)) as pool:
+        summaries = list(pool.map(_one, items))
+    return {"summaries": summaries}
+```
+
 # decompose, then branch
 
 plan the graph before mutating. break the request into focused steps, and branch wherever sub-tasks are independent or cases diverge — parallel paths over a single overloaded node. but don't over-split: each node should be a step a human would name out loud. if a piece has no independent reason to exist and nothing branches off it, fold it into its neighbour.
@@ -110,6 +131,7 @@ plan the graph before mutating. break the request into focused steps, and branch
 - prefer several focused nodes over one giant node.
 - leave `model=""` for nodes that don't call an LLM, or to use the user's default.
 - only enable tools a node actually uses. `shell` is dangerous — opt in deliberately.
+- *parallelise independent `ctx.call_llm` calls* — `ctx` is thread-safe, the run panel renders concurrent calls as parallel cards, and a sequential loop of N llm calls is almost always wrong. applies to loops over lists *and* to nodes that just happen to make multiple unrelated calls.
 - *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`), `inputs`/`outputs`, and — for any node that calls `ctx.call_llm` — the matching `tools_enabled`. nodes are not placeholders to fill in later.
 
 # your tool surface

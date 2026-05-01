@@ -150,6 +150,10 @@ html, body, #root {
 }
 .tool-call:hover { background: rgba(26, 23, 20, 0.05); }
 
+/* dense, clickable row for run trace inputs/outputs/logs */
+.port-row:hover { background: rgba(26, 23, 20, 0.05); }
+.port-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
 /* caret */
 .caret {
   display: inline-block;

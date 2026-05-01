@@ -3,7 +3,6 @@ import Editor from '@monaco-editor/react';
 import type { WFNode, IOPort, WorkflowDetail, Run, NodeRun, NodeRunStatus } from '../types';
 import { api } from '../api';
 import { JsonView } from './JsonView';
-import { ModelInput } from './ModelInput';
 
 const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
   pending: 'idle',
@@ -13,8 +12,6 @@ const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
   skipped: 'skipped',
 };
 
-const TOOL_NAMES = ['shell', 'web_search', 'web_fetch'];
-
 interface Props {
   node: WFNode;
   workflow: WorkflowDetail;
@@ -22,7 +19,7 @@ interface Props {
   onChange: () => void;
 }
 
-type Tab = 'code' | 'i/o' | 'config' | 'last run';
+type Tab = 'code' | 'i/o' | 'last run';
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
@@ -38,11 +35,12 @@ const PANEL_STYLE: React.CSSProperties = {
  *
  * Topology (node name, description, port shape, input/output role) is owned
  * exclusively by the orchestrator and rendered read-only here — the user
- * asks the orchestrator via chat to make those changes.
+ * asks the orchestrator via chat to make those changes. Per-node model and
+ * tools likewise live with the orchestrator; user-level defaults are set
+ * once in workflow settings.
  *
  * Content the user can still refine directly:
  *   - code (Monaco editor)
- *   - config: model / tools
  *
  * Saves set `mark_user_edited` so the orchestrator's next pass can preserve
  * user intent (per PRD §4.4).
@@ -50,14 +48,10 @@ const PANEL_STYLE: React.CSSProperties = {
 export function NodePanel({ node, workflow, onClose, onChange }: Props) {
   const [tab, setTab] = useState<Tab>('code');
   const [code, setCode] = useState(node.code);
-  const [model, setModel] = useState(node.config.model || '');
-  const [tools, setTools] = useState<string[]>(node.config.tools_enabled || []);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     setCode(node.code);
-    setModel(node.config.model || '');
-    setTools(node.config.tools_enabled || []);
     setDirty(false);
     setTab('code');
   }, [node.id]);
@@ -69,7 +63,6 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
   const save = async () => {
     await api.patchNode(node.id, {
       code,
-      config: { model, tools_enabled: tools },
       mark_user_edited: true,
     });
     setDirty(false);
@@ -132,7 +125,7 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
       </div>
 
       <div style={{ display: 'flex', borderBottom: '1px solid var(--rule)', padding: '0 18px' }}>
-        {(['code', 'i/o', 'config', 'last run'] as const).map((k) => (
+        {(['code', 'i/o', 'last run'] as const).map((k) => (
           <button
             key={k}
             onClick={() => setTab(k)}
@@ -215,49 +208,6 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
               </span>
               . ask in the chat to add, rename, or remove one.
             </div>
-          </div>
-        )}
-
-        {tab === 'config' && (
-          <div style={{ padding: 18 }}>
-            <ConfigRow k="model">
-              <ModelInput
-                value={model}
-                onChange={(v) => { setModel(v); setDirty(true); }}
-                placeholder="(use default from settings)"
-                variant="bordered"
-                ariaLabel="model"
-              />
-            </ConfigRow>
-            <ConfigRow k="tools">
-              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                {TOOL_NAMES.map((t) => (
-                  <label
-                    key={t}
-                    className="mono"
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--ink-2)' }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={tools.includes(t)}
-                      onChange={(e) => {
-                        setTools(e.target.checked ? [...tools, t] : tools.filter((x) => x !== t));
-                        setDirty(true);
-                      }}
-                    />
-                    {t}
-                  </label>
-                ))}
-              </div>
-            </ConfigRow>
-            <ConfigRow k="role">
-              <span
-                className="serif"
-                style={{ fontStyle: 'italic', fontSize: 12.5, color: role ? 'var(--accent-ink)' : 'var(--ink-4)' }}
-              >
-                {role ? `· ${role}` : '— neither input nor output. orchestra decides.'}
-              </span>
-            </ConfigRow>
           </div>
         )}
 
@@ -579,19 +529,4 @@ function RunSection({ label, json }: { label: string; json: unknown }) {
   );
 }
 
-function ConfigRow({ k, children }: { k: string; children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        padding: '12px 0',
-        borderBottom: '1px solid var(--rule-2)',
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 16,
-      }}
-    >
-      <span className="smallcaps" style={{ width: 80 }}>{k}</span>
-      <div style={{ flex: 1 }}>{children}</div>
-    </div>
-  );
-}
+

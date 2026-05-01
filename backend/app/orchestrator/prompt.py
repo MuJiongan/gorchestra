@@ -1,11 +1,50 @@
 """System prompt + per-turn graph state injection for the orchestrator."""
 from __future__ import annotations
+import inspect
 import json
 from datetime import date
 
 from sqlalchemy.orm import Session as DbSession
 
 from app import models
+from app.runner import tools as _runtime_tools
+
+
+# Return-shape annotations for the node-runtime tools, surfaced to the
+# orchestrator alongside `inspect.signature(...)` of the param list. The
+# Python functions are typed `-> dict` (we'd lose the structure if we
+# rendered the bare annotation), so we describe the dict's shape here. Keep
+# in sync with the implementations in app/runner/tools.py.
+_NODE_TOOL_RETURN_SHAPES = {
+    "shell": "{stdout: str, stderr: str, returncode: int}",
+    "web_search": (
+        "{search_id: str, results: list[{url: str, title: str, "
+        "publish_date: str | None, excerpts: list[str]}]}  "
+        "(or {error: str, results: []} on transport failure)"
+    ),
+    "web_fetch": (
+        "{extract_id: str, results: list[{url: str, title: str, excerpts: list[str], "
+        "full_content: str | None}], errors: list[{url: str, error_type: str, "
+        "http_status_code: int, content: str}]}  "
+        "— per-result `full_content` is populated only when the call passed "
+        "`full_content=True`; per-URL fetch failures land in `errors`, not `results`. "
+        "(or {error: str, results: []} on transport failure)"
+    ),
+}
+
+
+def _format_node_tool_signatures() -> str:
+    """Render one signature line per registered node-runtime tool. Pulls
+    parameter names + types via ``inspect.signature`` so renames in
+    ``runner/tools.py`` flow through automatically."""
+    lines: list[str] = []
+    for name, fn in _runtime_tools.REGISTRY.items():
+        # eval_str=True resolves PEP 563 lazy annotations so str(sig) renders
+        # them as ``int``, ``str``, ``list[str]`` rather than quoted strings.
+        params_str = str(inspect.signature(fn, eval_str=True)).split(" -> ")[0]
+        ret = _NODE_TOOL_RETURN_SHAPES.get(name, "dict")
+        lines.append(f"- `{name}{params_str} -> {ret}`")
+    return "\n".join(lines)
 
 
 SYSTEM_PROMPT = """\
@@ -58,10 +97,17 @@ def run(inputs, ctx):
 `ctx` provides:
 
 - `ctx.call_llm(prompt, tools=[...])` — runs an LLM inside the node. Pass tool names (`"shell"`, `"web_search"`, `"web_fetch"`) in the `tools` list; the LLM running inside the node decides when to invoke them. The names you pass here must also be in the node's `tools_enabled` list (otherwise the runner strips them). Returns a dict with keys `content` (str), `tool_calls_made` (list), `usage`, `cost`. The model defaults to the user's configured default node model; pass `model="..."` only when a node genuinely needs a different one.
+- `ctx.tools.shell(...)` / `ctx.tools.web_search(...)` / `ctx.tools.web_fetch(...)` — direct (non-LLM) tool calls, returning the same dicts the LLM-mediated form would produce. These bypass `tools_enabled` (which only gates the LLM surface in `call_llm`) — the call site itself is the opt-in. Skip the LLM round-trip when the call is fully determined by the node's inputs and there's nothing for a model to decide.
 - `ctx.log("...")` — appends a visible line to the run log.
 - `ctx.workdir` — `pathlib.Path` to a per-run scratch directory.
 
-**Never write `ctx.tools.X(...)` as a standalone python statement.** Tools are LLM-mediated only — route every tool invocation through `call_llm(tools=[...])`.
+Both forms are valid. Choose whichever fits the node's purpose: route through `ctx.call_llm(tools=[...])` when the model should drive the call, or invoke `ctx.tools.X(...)` directly when it shouldn't.
+
+## node-runtime tool signatures
+
+These are the canonical signatures for `shell`, `web_search`, `web_fetch`. They apply to both forms — direct (`ctx.tools.X(...)`) and LLM-mediated (`ctx.call_llm(tools=[...])`) — so write call sites that match exactly. All params are keyword-or-positional; both styles work.
+
+[[NODE_TOOL_SIGNATURES]]
 
 The returned dict's keys must exactly match the declared output names. Set an output to `None` when it doesn't apply on this run.
 
@@ -177,6 +223,11 @@ For refinements, mutate in place; don't tear the graph down unless asked. Keep c
 
 Design, don't over-explain.
 """
+
+
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+    "[[NODE_TOOL_SIGNATURES]]", _format_node_tool_signatures()
+)
 
 
 def graph_state_message(db: DbSession, workflow_id: str) -> dict:

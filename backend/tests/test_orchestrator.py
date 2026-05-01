@@ -713,16 +713,34 @@ def test_system_prompt_explains_user_edited_flag():
     assert "preserve" in SYSTEM_PROMPT.lower()
 
 
-def test_system_prompt_forbids_direct_ctx_tools_calls():
-    """Tools are LLM-mediated only — generated node code must route every
-    tool invocation through `call_llm(tools=[...])`, never as a standalone
-    `ctx.tools.X(...)` line."""
-    lower = SYSTEM_PROMPT.lower()
-    # The rule must be present and decisive.
-    assert "ctx.tools" in lower
-    assert "never" in lower
-    # And the orchestrator must be told that tools live in call_llm's tools list.
-    assert "tools=[...]" in SYSTEM_PROMPT or "tools=[" in SYSTEM_PROMPT
+def test_system_prompt_offers_both_direct_and_llm_tool_forms():
+    """Nodes can invoke tools two ways: through `ctx.call_llm(tools=[...])` so
+    the model decides, or directly via `ctx.tools.X(...)` for deterministic
+    calls. The prompt must surface both — choosing between them is the
+    orchestrator's call."""
+    p = SYSTEM_PROMPT
+    assert "ctx.tools" in p
+    assert "tools=[...]" in p or "tools=[" in p
+
+
+def test_system_prompt_lists_node_runtime_tool_signatures():
+    """The orchestrator writes Python like `ctx.tools.web_fetch(...)` — it
+    needs the canonical signatures (param names + types) in the prompt or it
+    has to guess. Pulled at module load from `runner.tools.REGISTRY` via
+    `inspect.signature`, so this test also catches signature drift."""
+    from app.runner import tools as runtime_tools
+
+    p = SYSTEM_PROMPT
+    # placeholder must have been substituted
+    assert "[[NODE_TOOL_SIGNATURES]]" not in p
+    # Every registered tool's name appears in a signature-shaped line.
+    for name in runtime_tools.REGISTRY:
+        assert f"`{name}(" in p, f"missing signature line for '{name}'"
+    # Spot-check a few of the actual params so a rename in tools.py
+    # would break this test rather than silently drift the prompt.
+    assert "command: str" in p  # shell
+    assert "query: str" in p  # web_search
+    assert "urls: list[str]" in p  # web_fetch
 
 
 def test_system_prompt_distinguishes_orchestrator_vs_node_tools():

@@ -77,9 +77,17 @@ interface LiveLLMCall {
   errorMsg?: string;
 }
 
+// A direct (non-LLM) tool call, e.g. `ctx.tools.web_fetch(...)`. The backend
+// emits the same `tool_call_started` / `tool_call_finished` events as the
+// LLM-mediated path, with `via: 'direct'` and a `call_id` we use to thread
+// pending → ok/err for the same call.
+type DirectCallStatus = 'pending' | 'ok' | 'err';
+
 interface DirectToolCall {
+  call_id: string;
   tool: string;
   args: Record<string, unknown>;
+  status: DirectCallStatus;
   result?: unknown;
   error?: string;
 }
@@ -92,7 +100,8 @@ interface NodeTrace {
   logs: string[];
   llmCalls: LiveLLMCall[];          // insertion-ordered
   llmCallById: Map<string, LiveLLMCall>;
-  directToolCalls: DirectToolCall[];
+  directToolCalls: DirectToolCall[];           // insertion-ordered
+  directToolCallById: Map<string, DirectToolCall>;
   error?: string | null;
   duration_ms?: number;
   cost?: number;
@@ -131,6 +140,7 @@ function aggregateEvents(events: RunEvent[]): NodeTrace[] {
         llmCalls: [],
         llmCallById: new Map(),
         directToolCalls: [],
+        directToolCallById: new Map(),
       };
       byId.set(id, t);
       order.push(id);
@@ -222,8 +232,22 @@ function aggregateEvents(events: RunEvent[]): NodeTrace[] {
         }
         tc.args = ev.args;
         tc.status = 'pending';
+      } else if (ev.via === 'direct' && ev.call_id) {
+        let dtc = t.directToolCallById.get(ev.call_id);
+        if (!dtc) {
+          dtc = {
+            call_id: ev.call_id,
+            tool: ev.tool,
+            args: ev.args,
+            status: 'pending',
+          };
+          t.directToolCallById.set(ev.call_id, dtc);
+          t.directToolCalls.push(dtc);
+        } else {
+          dtc.tool = ev.tool || dtc.tool;
+          dtc.args = ev.args;
+        }
       }
-      // direct tool starts get matched up at finish — nothing to record yet.
     } else if (ev.type === 'tool_call_finished') {
       const t = ensureNode(ev.node_id);
       if (ev.via === 'llm' && ev.call_id) {
@@ -246,12 +270,26 @@ function aggregateEvents(events: RunEvent[]): NodeTrace[] {
         tc.error = ev.error;
         tc.status = ev.error ? 'err' : 'ok';
       } else {
-        t.directToolCalls.push({
-          tool: ev.tool,
-          args: ev.args,
-          result: ev.result,
-          error: ev.error,
-        });
+        // Direct call. Match the pending entry by call_id when available;
+        // fall back to creating a fresh entry (handles older runs that
+        // lacked call_id on direct events).
+        let dtc: DirectToolCall | undefined;
+        if (ev.call_id) dtc = t.directToolCallById.get(ev.call_id);
+        if (!dtc) {
+          dtc = {
+            call_id: ev.call_id ?? `direct-${t.directToolCalls.length + 1}`,
+            tool: ev.tool,
+            args: ev.args,
+            status: 'pending',
+          };
+          t.directToolCallById.set(dtc.call_id, dtc);
+          t.directToolCalls.push(dtc);
+        }
+        dtc.tool = ev.tool || dtc.tool;
+        dtc.args = ev.args;
+        dtc.result = ev.result;
+        dtc.error = ev.error;
+        dtc.status = ev.error ? 'err' : 'ok';
       }
     } else if (ev.type === 'node_finished') {
       const t = ensureNode(ev.node_id);
@@ -644,17 +682,13 @@ function RunTraceCard({
                     <LLMCallCard key={c.call_id} call={c} index={idx} />
                   ))}
                   {t.directToolCalls.length > 0 && (
-                    <div style={{ marginBottom: 8 }}>
+                    <div style={{ margin: '10px 0 0' }}>
                       <div className="smallcaps" style={{ marginBottom: 4 }}>
                         tool calls — direct
                       </div>
-                      <ValueRow
-                        label={`${t.directToolCalls.length} ${
-                          t.directToolCalls.length === 1 ? 'call' : 'calls'
-                        }`}
-                        value={t.directToolCalls}
-                        viewerTitle={`${nodeName} · direct tool calls`}
-                      />
+                      {t.directToolCalls.map((dtc) => (
+                        <DirectToolCard key={dtc.call_id} call={dtc} />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -900,6 +934,80 @@ function TraceRow({
         />
       )}
     </>
+  );
+}
+
+function DirectToolCard({ call }: { call: DirectToolCall }) {
+  const [expanded, setExpanded] = useState(false);
+  const status = call.status;
+  const statusLabel =
+    status === 'ok' ? '✓ done' :
+    status === 'err' ? '× failed' :
+    '… running';
+  const statusColor =
+    status === 'ok' ? 'var(--state-ok)' :
+    status === 'err' ? 'var(--state-err)' :
+    'var(--ink-4)';
+  const argsDisplay = JSON.stringify(call.args);
+
+  return (
+    <div
+      className="tool-call fade-in"
+      style={{ padding: '7px 10px', margin: '6px 0', cursor: 'pointer' }}
+      onClick={() => setExpanded((v) => !v)}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5 }}>
+        <span className="mono" style={{ color: 'var(--accent-ink)', fontSize: 10.5 }}>
+          {call.tool || '…'}
+        </span>
+        <span
+          className="mono"
+          style={{
+            color: 'var(--ink-4)',
+            fontSize: 10.5,
+            flex: 1,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {argsDisplay || '…'}
+        </span>
+        <span className="smallcaps" style={{ color: statusColor, fontSize: 9 }}>
+          {status === 'pending' && <span className="caret" style={{ marginRight: 4 }} />}
+          {statusLabel}
+        </span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
+          <div className="smallcaps" style={{ marginBottom: 3 }}>args</div>
+          <JsonView value={call.args} />
+          {call.status === 'ok' && call.result !== undefined && (
+            <ValueRow
+              label="result"
+              value={call.result}
+              viewerTitle={`${call.tool || 'tool'} · result`}
+            />
+          )}
+          {call.status === 'err' && call.error && (
+            <>
+              <div
+                className="smallcaps"
+                style={{ margin: '6px 0 3px', color: 'var(--state-err)' }}
+              >
+                error
+              </div>
+              <pre
+                className="mono"
+                style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: 0 }}
+              >
+                {call.error}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

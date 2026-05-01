@@ -2,8 +2,10 @@
 
 The loop calls the LLM, executes any returned tool calls (graph mutations),
 appends the results to the conversation, and repeats until the LLM stops
-calling tools or hits a max-turns cap. Each significant step is yielded as an
-event dict for the SSE handler to forward to the chat UI.
+calling tools. There's no turn cap — a runaway loop is a cancel-button
+concern, matching the node-runtime ``ctx.call_llm`` model. Each significant
+step is yielded as an event dict for the SSE handler to forward to the chat
+UI.
 """
 from __future__ import annotations
 import json
@@ -21,7 +23,6 @@ from app.orchestrator.prompt import SYSTEM_PROMPT, graph_state_message
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL_FALLBACK = "anthropic/claude-opus-4.7"
-MAX_TURNS = 12
 
 REASONING_EFFORT = "medium"
 
@@ -449,7 +450,7 @@ def run_turn(db: DbSession, session_id: str, user_text: str) -> Iterator[dict]:
         yield {"kind": "done"}
 
     try:
-        for _turn_idx in range(MAX_TURNS):
+        while True:
             # Bail between LLM turns.
             if cancel_event.is_set():
                 yield from _cancellation_events()
@@ -568,9 +569,6 @@ def run_turn(db: DbSession, session_id: str, user_text: str) -> Iterator[dict]:
             if cancelled_mid_turn:
                 yield from _cancellation_events()
                 return
-        # max turns reached
-        yield {"kind": "error", "message": "orchestrator hit max-turns cap"}
-        yield {"kind": "done"}
     except Exception as e:  # pragma: no cover — defensive
         yield {"kind": "error", "message": f"{type(e).__name__}: {e}"}
         yield {"kind": "done"}

@@ -9,6 +9,7 @@ render concurrent calls (a node spawning threads, each calling ``call_llm``)
 as parallel streaming cards instead of mashing them together.
 """
 from __future__ import annotations
+import inspect
 import itertools
 import threading
 from pathlib import Path
@@ -22,23 +23,53 @@ EmitFn = Callable[[dict], None]
 
 
 class _ToolsProxy:
-    """Direct (non-LLM) access: ctx.tools.shell(command="..."), etc."""
+    """Direct (non-LLM) access: ctx.tools.shell(command="..."), etc.
+
+    No ``tools_enabled`` gating here on purpose — that allow-list bounds the
+    LLM's tool surface inside ``call_llm``. Direct calls come from Python the
+    orchestrator wrote (or the user hand-edited); the call site itself is the
+    opt-in.
+    """
 
     def __init__(self, recorder: list[dict], on_event: EmitFn, lock: threading.Lock):
         self._recorder = recorder
         self._on_event = on_event
         self._lock = lock
+        # Each direct call gets a unique id so the run UI can match its
+        # ``tool_call_started`` (pending state) to ``tool_call_finished``
+        # (ok/err) instead of dumping everything into a flat list.
+        self._call_counter = itertools.count(1)
 
     def __getattr__(self, name: str):
         fn = REGISTRY.get(name)
         if fn is None:
             raise AttributeError(f"no tool '{name}' in registry")
 
-        def wrapped(**kwargs):
-            self._on_event({"type": "tool_call_started", "tool": name, "args": kwargs, "via": "direct"})
-            entry: dict = {"name": name, "args": kwargs, "via": "direct"}
+        sig = inspect.signature(fn)
+
+        def wrapped(*args, **kwargs):
+            # Normalise positional + keyword into a single dict keyed by the
+            # tool's parameter names — keeps the event payload consistent
+            # whether the caller wrote `ctx.tools.web_fetch(url)` or
+            # `ctx.tools.web_fetch(url=url)`. Bind errors (missing required,
+            # unexpected name) surface as TypeError, matching plain Python.
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            call_args = dict(bound.arguments)
+            tc_id = f"direct-{next(self._call_counter)}"
+
+            self._on_event(
+                {
+                    "type": "tool_call_started",
+                    "tool": name,
+                    "args": call_args,
+                    "via": "direct",
+                    "call_id": tc_id,
+                }
+            )
+            entry: dict = {"name": name, "args": call_args, "via": "direct"}
             try:
-                result = fn(**kwargs)
+                result = fn(*args, **kwargs)
                 entry["result"] = result
                 with self._lock:
                     self._recorder.append(entry)
@@ -46,9 +77,10 @@ class _ToolsProxy:
                     {
                         "type": "tool_call_finished",
                         "tool": name,
-                        "args": kwargs,
+                        "args": call_args,
                         "result": result,
                         "via": "direct",
+                        "call_id": tc_id,
                     }
                 )
                 return result
@@ -61,9 +93,10 @@ class _ToolsProxy:
                     {
                         "type": "tool_call_finished",
                         "tool": name,
-                        "args": kwargs,
+                        "args": call_args,
                         "error": err,
                         "via": "direct",
+                        "call_id": tc_id,
                     }
                 )
                 raise

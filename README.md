@@ -11,7 +11,7 @@ See `docs/PRD.md` for the full design.
 Phases 0–5 are implemented:
 
 - **Phase 0** Backend (FastAPI) + frontend (Vite/React/React Flow/Monaco) scaffold.
-- **Phase 1** Execution engine: tool registry (`shell`, `fetch`, `web_search`),
+- **Phase 1** Execution engine: tool registry (`shell`, `web_search`, `web_fetch`),
   `call_llm` over OpenRouter with agent-loop tool-calling, `ctx` injected into
   nodes, subprocess-isolated workflow runner with topo sort, null
   propagation, and required/optional input skip rule.
@@ -29,7 +29,7 @@ Phases 0–5 are implemented:
 
 Not yet built (see PRD §10 for the full list): orchestrator-driven test runs
 (`run_workflow` / `get_run` / `generate_test_data`), file-typed inputs, run
-pruning, single-package install, in-node token streaming.
+pruning, single-package install.
 
 ## Run it
 
@@ -62,7 +62,7 @@ Then either:
 
 ```python
 def run(inputs, ctx):
-    # ctx.call_llm(model="", prompt=..., tools=["shell", "fetch", "web_search"])
+    # ctx.call_llm(model="", prompt=..., tools=["shell", "web_search", "web_fetch"])
     #   tools are LLM-mediated — pass tool names in the tools=[...] list and
     #   the LLM running inside this call decides when/how to invoke them.
     #   model="" falls back to the user's default node model.

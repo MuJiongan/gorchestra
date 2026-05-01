@@ -397,7 +397,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
                     "model": {"type": "string", "description": "OpenRouter model id (optional)"},
                     "tools_enabled": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["shell", "fetch", "web_search"]},
+                        "items": {"type": "string", "enum": ["shell", "web_search", "web_fetch"]},
                     },
                 },
                 "required": ["name"],
@@ -450,7 +450,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
                     "model": {"type": "string"},
                     "tools_enabled": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["shell", "fetch", "web_search"]},
+                        "items": {"type": "string", "enum": ["shell", "web_search", "web_fetch"]},
                     },
                 },
                 "required": ["node_id"],

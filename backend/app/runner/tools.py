@@ -24,24 +24,6 @@ def shell(command: str, timeout: int = 30) -> dict:
         }
 
 
-def fetch(
-    url: str,
-    method: str = "GET",
-    headers: dict | None = None,
-    json: dict | None = None,
-    params: dict | None = None,
-    timeout: int = 30,
-) -> dict:
-    """HTTP request. Returns {status, headers, body}."""
-    with httpx.Client(timeout=timeout) as client:
-        r = client.request(method, url, headers=headers, json=json, params=params)
-        try:
-            body = r.json()
-        except Exception:
-            body = r.text
-        return {"status": r.status_code, "headers": dict(r.headers), "body": body}
-
-
 def web_search(query: str, max_results: int = 5) -> dict:
     """Web search via parallel.ai."""
     api_key = os.getenv("PARALLEL_API_KEY", "")
@@ -61,10 +43,38 @@ def web_search(query: str, max_results: int = 5) -> dict:
             return {"error": "non-json response", "raw": r.text}
 
 
+def web_fetch(urls: list[str], objective: str, full_content: bool) -> dict:
+    """Fetch URL(s) as LLM-clean markdown via parallel.ai Extract.
+
+    The caller chooses ``full_content``: ``True`` returns the entire page
+    markdown (use when reading an article/paper/doc end-to-end); ``False``
+    returns only objective-targeted excerpts (cheaper; use when looking up
+    a specific fact).
+    """
+    api_key = os.getenv("PARALLEL_API_KEY", "")
+    if not api_key:
+        return {"error": "PARALLEL_API_KEY not set", "results": []}
+    body: dict = {"urls": urls, "objective": objective}
+    if full_content:
+        body["advanced_settings"] = {"full_content": True}
+    with httpx.Client(timeout=120) as client:
+        r = client.post(
+            "https://api.parallel.ai/v1/extract",
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            json=body,
+        )
+        if r.status_code >= 400:
+            return {"error": f"parallel.ai {r.status_code}: {r.text}", "results": []}
+        try:
+            return r.json()
+        except Exception:
+            return {"error": "non-json response", "raw": r.text}
+
+
 REGISTRY = {
     "shell": shell,
-    "fetch": fetch,
     "web_search": web_search,
+    "web_fetch": web_fetch,
 }
 
 
@@ -84,24 +94,6 @@ TOOL_SCHEMAS = {
             },
         },
     },
-    "fetch": {
-        "type": "function",
-        "function": {
-            "name": "fetch",
-            "description": "Make an HTTP request. Returns {status, headers, body}.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string"},
-                    "method": {"type": "string", "default": "GET"},
-                    "headers": {"type": "object"},
-                    "json": {"type": "object"},
-                    "params": {"type": "object"},
-                },
-                "required": ["url"],
-            },
-        },
-    },
     "web_search": {
         "type": "function",
         "function": {
@@ -114,6 +106,36 @@ TOOL_SCHEMAS = {
                     "max_results": {"type": "integer", "default": 5},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    "web_fetch": {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch one or more URLs as LLM-clean markdown via parallel.ai Extract. "
+                "Handles JS-rendered pages and PDFs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "urls": {"type": "array", "items": {"type": "string"}},
+                    "objective": {
+                        "type": "string",
+                        "description": "What you're trying to extract; narrows the excerpts.",
+                    },
+                    "full_content": {
+                        "type": "boolean",
+                        "description": (
+                            "True = return the entire page markdown (use when you need "
+                            "to read a page end-to-end: articles, papers, docs). "
+                            "False = return only objective-targeted excerpts (cheaper; "
+                            "use when looking up a specific fact). Decide per call."
+                        ),
+                    },
+                },
+                "required": ["urls", "objective", "full_content"],
             },
         },
     },

@@ -126,13 +126,13 @@ def test_rename_and_configure_node(db, workflow):
         node_id=nid,
         description="patched",
         model="anthropic/claude-sonnet-4.5",
-        tools_enabled=["fetch"],
+        tools_enabled=["web_fetch"],
     )
     n = db.get(models.Node, nid)
     assert n.name == "new"
     assert n.description == "patched"
     assert n.config["model"] == "anthropic/claude-sonnet-4.5"
-    assert n.config["tools_enabled"] == ["fetch"]
+    assert n.config["tools_enabled"] == ["web_fetch"]
     assert "timeout_s" not in n.config
 
 
@@ -728,7 +728,7 @@ def test_system_prompt_forbids_direct_ctx_tools_calls():
 def test_system_prompt_distinguishes_orchestrator_vs_node_tools():
     """The prompt must teach the orchestrator that there are two kinds of
     tool: ones it invokes directly (graph mutators) and ones it *equips
-    nodes with* (shell/fetch/web_search). The framing is constructive — the
+    nodes with* (shell/web_search/web_fetch). The framing is constructive — the
     orchestrator has agency over both — but the categories are distinct.
     """
     p = SYSTEM_PROMPT

@@ -1,7 +1,7 @@
 # PRD: orchestra (gorchestra)
 
 ## 1. Pitch
-A local web app where a user describes a problem in natural language, and an **orchestrator LLM** designs a tailored Python workflow — a graph of nodes connected by edges — to solve it. The user watches the graph build live in a chat panel beside the canvas, can run the workflow with their own inputs, edit any node's code, or chat with the orchestrator to keep refining. Every node is Python with access to `ctx.call_llm` (any OpenRouter model) and a tool library (web search, HTTP fetch, shell) the LLM can invoke from inside a node.
+A local web app where a user describes a problem in natural language, and an **orchestrator LLM** designs a tailored Python workflow — a graph of nodes connected by edges — to solve it. The user watches the graph build live in a chat panel beside the canvas, can run the workflow with their own inputs, edit any node's code, or chat with the orchestrator to keep refining. Every node is Python with access to `ctx.call_llm` (any OpenRouter model) and a tool library (web search, web fetch, shell) the LLM can invoke from inside a node.
 
 ## 2. Users
 - **Primary:** technical-ish users who want a tailored LLM workflow without hand-coding a graph framework, but who *can* read/edit Python when they want control.
@@ -49,7 +49,7 @@ Single-user, localhost-only for v1.
 ## 5. Functional Requirements
 
 ### 5.1 Orchestrator
-- LLM agent over OpenRouter; default model is read from the user's settings (`default_orchestrator_model`), falling back to `anthropic/claude-sonnet-4.5`.
+- LLM agent over OpenRouter; default model is read from the user's settings (`default_orchestrator_model`), falling back to `anthropic/claude-opus-4.7`.
 - Always-on extended thinking (`reasoning.effort = "medium"`). Reasoning details are persisted alongside each assistant message and replayed verbatim on the next turn — Anthropic enforces ordering of these blocks.
 - System prompt covers: graph semantics, node runtime contract, available runtime tools, null-propagation rules, required-vs-optional inputs, the distinction between graph-shaping tools (the orchestrator calls these) and node-runtime tools (it equips nodes with these), tone conventions, and how to handle `user_edited` nodes.
 - Streams reasoning chunks, visible content chunks, tool-call start/end events, errors, and a terminal `done` event over **Server-Sent Events** (`POST /api/sessions/{sid}/messages`).
@@ -80,8 +80,8 @@ def run(inputs: dict, ctx) -> dict:
 - This gives if/else and short-circuit without explicit conditional edges.
 
 Execution:
-- Nodes run in topo order in a single workflow-level subprocess (`python -m app.runner.child`). Single-threaded, sequential. No parallel fan-out v1.
-- The child emits structured JSON-line events to stdout (`run_started`, `node_started`, `log`, `llm_call_started/finished`, `tool_call_started/finished`, `node_finished`, `run_finished`); the parent appends them to an in-memory pub/sub keyed by `run_id`.
+- Nodes run in a single workflow-level subprocess (`python -m app.runner.child`). Independent nodes execute concurrently via a `ThreadPoolExecutor`: as each node finishes, its successors decrement their pending-input count and any whose count reaches zero are submitted next. Topology is still respected — a node only starts once every upstream node has produced its outputs (or been skipped). Within a node, `ctx.call_llm` is thread-safe and node code is encouraged to parallelise per-item LLM calls with its own pool.
+- The child emits structured JSON-line events to stdout (`run_started`, `node_started`, `log`, `llm_call_started`, `llm_call_chunk`, `llm_call_finished`, `tool_call_started`, `tool_call_finished`, `node_finished`, `run_finished`). Concurrent calls are disambiguated by `call_id`. The parent appends events to an in-memory pub/sub keyed by `run_id`.
 - Cancellation only — there is no per-node or workflow-level timeout enforcement; a hung node hangs the run until the user clicks **cancel** (parent SIGTERMs the child; child raises `KeyboardInterrupt` and emits a `cancelled` `run_finished`).
 - A `tools_enabled` allow-list on the node config is enforced: tools requested in `ctx.call_llm(tools=[...])` that aren't in the allow-list are silently dropped before the call.
 
@@ -89,7 +89,7 @@ Execution:
 - Single function over OpenRouter.
 - Signature: `call_llm(model: str, prompt: str | messages, tools: list[str] = [], **opts) -> dict`.
 - When `tools` is non-empty, runs an agent loop: LLM → tool calls → tool results → LLM, until the LLM stops calling tools. There's no turn cap — a runaway loop is a cancel-button concern, same as any other hung node.
-- **Not** token-streaming inside nodes in v1 — it returns the full assembled response. The runner emits `llm_call_started` / `llm_call_finished` events around each call so the run panel shows progress at the call granularity.
+- Streams from OpenRouter token-by-token: the runner forwards content, reasoning, and tool-argument deltas as `llm_call_chunk` events tagged with the per-call `call_id`, so concurrent calls render as parallel streaming cards in the run panel. The function still *returns* the full assembled response when the agent loop terminates.
 - Captures cost + token counts from OpenRouter (requests `usage.include = true` so `usage.cost` is populated).
 
 ### 5.4 Tool library (v1)
@@ -97,8 +97,8 @@ Execution:
 | Tool | Purpose | Auth |
 |---|---|---|
 | `shell` | Run a shell command (covers file I/O via `cat`, `ls`, `mv`, etc.) — returns `{stdout, stderr, returncode}`. 30s default timeout. | none — flagged dangerous in UI |
-| `fetch` | HTTP request — returns `{status, headers, body}`. | none |
-| `web_search` | Web search via parallel.ai. | parallel.ai key |
+| `web_search` | Web search via parallel.ai — returns ranked URLs + excerpts for a query. | parallel.ai key |
+| `web_fetch` | Read URL(s) as LLM-clean markdown via parallel.ai Extract — handles JS-rendered pages and PDFs. | parallel.ai key |
 
 Tools live in a single Python registry (`app.runner.tools.REGISTRY`). Each is callable via `ctx.call_llm(tools=[...])` (LLM-mediated, recommended) or `ctx.tools.<name>(...)` (direct, discouraged). Adding a tool = adding a function + JSON schema to the registry; not user-extensible v1.
 
@@ -106,7 +106,7 @@ Tools live in a single Python registry (`app.runner.tools.REGISTRY`). Each is ca
 - **Top bar:** product mark, current session picker (dropdown showing all workflows; in-line rename + delete on hover), status pill, **settings**, **new**, **run** buttons. No left sidebar.
 - **Chat panel (left, ~420px):** orchestrator conversation. Renders one growing assistant bubble per turn that interleaves reasoning blocks (collapsible), prose paragraphs, and tool-call cards (with status: pending / ok / err). Header shows current session name + the orchestrator model in use. Send + cancel buttons.
 - **Canvas (React Flow via `@xyflow/react`):** nodes draggable for position only. Edges drawn between named ports. Visual run-state dots per node (idle / running / success / error / skipped). Input/output nodes badged. **Topology mutations (add/remove nodes, add/remove edges, set input/output role) are owned exclusively by the orchestrator** — the canvas does not expose them as direct user actions. Position drags persist via `PATCH /api/nodes/{id}`.
-- **Node side panel** (on click): tabs for **code** (Monaco editor), **i/o** (read-only port shape), **config** (model + tools_enabled checkboxes for `shell` / `fetch` / `web_search`), **last run** (logs, LLM calls, tool calls). Saves set `mark_user_edited`.
+- **Node side panel** (on click): tabs for **code** (Monaco editor), **i/o** (read-only port shape), **config** (model + tools_enabled checkboxes for `shell` / `web_search` / `web_fetch`), **last run** (logs, LLM calls, tool calls). Saves set `mark_user_edited`.
 - **Run panel** (slides in from right; expandable to fullscreen): input form generated from the input node, run / cancel buttons, live per-node trace, final output viewer with total cost, recent-runs list (last 20 stored, last 8 surfaced).
 - **Settings:** OpenRouter API key, parallel.ai API key, default orchestrator model, default node model. Stored in browser `localStorage`, **not** the backend DB. Forwarded to the backend as request headers (`x-openrouter-key`, `x-parallel-key`, `x-orchestrator-model`, `x-node-model`); a per-request middleware copies them into `os.environ` for the lifetime of the request. The DB has a legacy `settings` table that acts as a backwards-compat fallback only.
 
@@ -190,7 +190,6 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 - Cloud deploy / hosted version
 - Workflow / node marketplace
 - Cycles / explicit conditional edges (use in-node loops + null branching)
-- Parallel fan-out execution
 - User-extensible tool plugins
 - Workflow versioning / undo-redo
 - Cost budgets, rate limits
@@ -200,7 +199,6 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 - **Orchestrator-driven test runs.** `run_workflow`, `get_run`, and `generate_test_data` tools so the orchestrator can run, inspect logs/errors, and self-debug between turns. The data model already carries `Run.kind = "test"` to distinguish them.
 - **Generative UI (designer agent).** A second LLM agent — the **designer** — that emits a single self-contained HTML/CSS/JS page tailored to the workflow's input/output shape, so the workflow can be invoked from a purpose-built UI rather than the generic textarea form. Invocation paths: (a) the orchestrator calls the designer as a tool when it judges the workflow stable enough to "ship a UI for"; (b) a dedicated **Design** tab in the app where the user asks the designer directly. Output is a single HTML document (inline CSS/JS, no build step) that posts to the workflow's run endpoint and renders results — dynamic per task: a chat box for a Q&A workflow, a form + table for a data-extraction workflow, a file dropzone for a doc-processing workflow, etc. Stored alongside the workflow; regeneratable. Open questions: where the page is hosted (served from the backend at `/w/{workflow_id}` vs. exported as a standalone file), how it authenticates to the run endpoint in the local-only model, and how it handles streaming run events.
 - **File-typed inputs.** Run panel currently exposes textareas only; file upload for file-typed input ports isn't built.
-- **Token streaming inside nodes.** `ctx.call_llm` returns the full response; per-token streaming into the node panel during a run isn't wired.
 - **Run pruning.** Older runs aren't auto-deleted once a workflow exceeds 20.
 - **Single-process packaging.** The PRD's original ambition of one `pip`-installed package serving both API and built frontend on a single port — the current dev setup runs them separately.
 
@@ -219,4 +217,4 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 5. **Orchestrator v1** ✅ chat session, SSE streaming with extended thinking, graph-mutation tool surface, `user_edited` awareness, mid-turn cancellation/supersession.
 6. **Orchestrator test-run loop** ⏳ `run_workflow` / `get_run` / `generate_test_data` so the orchestrator can run, inspect, and fix without the user in the loop.
 7. **Generative UI / designer agent** ⏳ second agent that emits a workflow-specific HTML page; invokable as an orchestrator tool and from a dedicated Design tab.
-8. **Polish** ⏳ file-typed inputs, run pruning, single-package packaging, in-node token streaming.
+8. **Polish** ⏳ file-typed inputs, run pruning, single-package packaging.

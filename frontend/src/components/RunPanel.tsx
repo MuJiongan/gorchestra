@@ -4,7 +4,7 @@ import type {
 } from '../types';
 import { api } from '../api';
 import { JsonView } from './JsonView';
-import { Markdown } from './Markdown';
+import { PortRow, ValueRow, ViewerOverlay } from './ValueViewer';
 
 interface Props {
   workflow: WorkflowDetail;
@@ -495,62 +495,44 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   );
 }
 
-// Renders the final output of a run as directly as possible.
-//
-// The backend emits `outputs` as a port-name → value dict (one entry per
-// output port on the output node). When there's a single port whose value
-// is a string we unwrap it and show the prose/markdown straight; readers
-// shouldn't have to expand a JSON tree to read the model's answer. Anything
-// richer falls back to the JsonView used elsewhere.
-const MD_HINTS_FO =
-  /(^|\n)\s*(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|```)|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)/m;
-
-function FinalOutput({ outputs }: { outputs: Record<string, unknown> }) {
+// Renders the final output of a run as a list of click-to-expand port rows,
+// matching the per-node trace view. The backend emits `outputs` as a
+// port-name → value dict (one entry per output port on the output node);
+// each entry becomes one row, and clicking opens the value in the same
+// fullscreen viewer used elsewhere.
+function FinalOutputBlock({
+  workflow,
+  outputs,
+}: {
+  workflow: WorkflowDetail;
+  outputs: Record<string, unknown>;
+}) {
+  const outNode = workflow.nodes.find((n) => n.id === workflow.output_node_id);
+  const schemaByName = new Map((outNode?.outputs ?? []).map((p) => [p.name, p]));
   const keys = Object.keys(outputs);
-  const single = keys.length === 1 ? outputs[keys[0]] : undefined;
-
-  if (typeof single === 'string') {
-    const isMd = single.length >= 12 && MD_HINTS_FO.test(single);
-    return (
-      <div
-        style={{
-          padding: '10px 12px',
-          background: 'var(--paper)',
-          border: '1px solid var(--rule-2)',
-          borderRadius: 3,
-          maxHeight: 480,
-          overflow: 'auto',
-        }}
-      >
-        {isMd ? (
-          <Markdown>{single}</Markdown>
-        ) : (
-          <div
-            className="serif"
-            style={{
-              fontSize: 13,
-              lineHeight: 1.55,
-              color: 'var(--ink)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {single}
-          </div>
-        )}
-      </div>
-    );
-  }
-  return <JsonView value={outputs} />;
-}
-
-function FinalOutputBlock({ outputs }: { outputs: Record<string, unknown> }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <div className="smallcaps" style={{ marginBottom: 6, color: 'var(--state-ok)' }}>
         final output
       </div>
-      <FinalOutput outputs={outputs} />
+      {keys.length === 0 ? (
+        <span
+          className="serif"
+          style={{ fontStyle: 'italic', fontSize: 11.5, color: 'var(--ink-4)' }}
+        >
+          none
+        </span>
+      ) : (
+        keys.map((k) => (
+          <PortRow
+            key={k}
+            name={k}
+            typeHint={schemaByName.get(k)?.type_hint}
+            value={outputs[k]}
+            viewerTitle={`final · ${k}`}
+          />
+        ))
+      )}
     </div>
   );
 }
@@ -605,7 +587,7 @@ function RunTraceCard({
           {error}
         </pre>
       )}
-      {hasFinal && outputs && <FinalOutputBlock outputs={outputs} />}
+      {hasFinal && outputs && <FinalOutputBlock workflow={workflow} outputs={outputs} />}
       <details style={{ marginTop: hasFinal ? 4 : 0 }} open={!hasFinal}>
         <summary
           className="smallcaps"
@@ -650,17 +632,30 @@ function RunTraceCard({
                       {t.error}
                     </pre>
                   )}
-                  {t.inputs !== undefined && <Section label="inputs" json={t.inputs} />}
-                  {t.outputs !== undefined && <Section label="outputs" json={t.outputs} />}
-                  {t.logs.length > 0 && <Section label="logs" json={t.logs} />}
+                  <NodeIOBlock
+                    workflow={workflow}
+                    nodeId={t.node_id}
+                    nodeName={nodeName}
+                    inputs={t.inputs}
+                    outputs={t.outputs}
+                    logs={t.logs.length ? t.logs : undefined}
+                  />
                   {t.llmCalls.map((c, idx) => (
                     <LLMCallCard key={c.call_id} call={c} index={idx} />
                   ))}
                   {t.directToolCalls.length > 0 && (
-                    <Section
-                      label={`tool calls — direct (${t.directToolCalls.length})`}
-                      json={t.directToolCalls}
-                    />
+                    <div style={{ marginBottom: 8 }}>
+                      <div className="smallcaps" style={{ marginBottom: 4 }}>
+                        tool calls — direct
+                      </div>
+                      <ValueRow
+                        label={`${t.directToolCalls.length} ${
+                          t.directToolCalls.length === 1 ? 'call' : 'calls'
+                        }`}
+                        value={t.directToolCalls}
+                        viewerTitle={`${nodeName} · direct tool calls`}
+                      />
+                    </div>
                   )}
                 </div>
               </details>
@@ -778,6 +773,7 @@ function CallRoundView({
   // Inside a round, content appears once reasoning has stopped streaming.
   const reasoningLive = live && !round.content && round.toolCalls.length === 0;
   const contentLive = live && !!round.content && round.toolCalls.length === 0;
+  const roundTitle = `round ${round.round + 1}`;
 
   return (
     <div style={{ marginTop: showRoundBadge ? 10 : 6 }}>
@@ -789,15 +785,21 @@ function CallRoundView({
           round {round.round + 1}
         </div>
       )}
-      {round.reasoning && <ReasoningBlock text={round.reasoning} live={reasoningLive} />}
+      {round.reasoning && (
+        <TraceRow
+          kind="reasoning"
+          text={round.reasoning}
+          live={reasoningLive}
+          viewerTitle={`${roundTitle} · thinking`}
+        />
+      )}
       {round.content && (
-        <div
-          className="tokens"
-          style={{ margin: '4px 0 0', color: 'var(--ink-2)', fontSize: 12 }}
-        >
-          {round.content}
-          {contentLive && <span className="caret" />}
-        </div>
+        <TraceRow
+          kind="content"
+          text={round.content}
+          live={contentLive}
+          viewerTitle={`${roundTitle} · output`}
+        />
       )}
       {round.toolCalls.length > 0 && (
         <div style={{ marginTop: 8 }}>
@@ -810,50 +812,94 @@ function CallRoundView({
   );
 }
 
-function ReasoningBlock({ text, live }: { text: string; live: boolean }) {
-  const [open, setOpen] = useState(live);
-  useEffect(() => {
-    setOpen(live);
-  }, [live]);
+/**
+ * Compact, click-to-open row for LLM reasoning / output streams.
+ *
+ * Nothing is shown inline — even while the call is streaming. The row only
+ * advertises that there is content (with a live char counter + caret while
+ * tokens arrive); clicking pops it into the fullscreen viewer, which
+ * re-renders against the latest text on every parent update.
+ */
+function TraceRow({
+  kind,
+  text,
+  live,
+  viewerTitle,
+}: {
+  kind: 'reasoning' | 'content';
+  text: string;
+  live: boolean;
+  viewerTitle: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const isReasoning = kind === 'reasoning';
+  const label = isReasoning ? (live ? 'thinking' : 'thought') : live ? 'streaming' : 'output';
+  const charCount = text.length;
+  const lineCount = text.split('\n').length;
+  const sizeText =
+    charCount === 0
+      ? '…'
+      : lineCount > 1
+        ? `${lineCount} lines · ${charCount.toLocaleString()} chars`
+        : `${charCount.toLocaleString()} chars`;
+
   return (
-    <div style={{ margin: '4px 0', borderLeft: '2px solid var(--rule)', paddingLeft: 10 }}>
+    <>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(true)}
+        className="port-row"
         style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
+          display: 'flex',
+          width: '100%',
+          alignItems: 'baseline',
+          gap: 8,
+          padding: '6px 8px',
+          margin: '4px -8px 0',
           background: 'transparent',
           border: 0,
-          padding: '2px 0',
+          borderRadius: 3,
           cursor: 'pointer',
-          color: 'var(--ink-4)',
-          fontFamily: 'var(--serif)',
-          fontStyle: 'italic',
-          fontSize: 11.5,
+          textAlign: 'left',
+          fontFamily: 'inherit',
+          color: 'inherit',
         }}
       >
-        {live ? 'thinking' : 'thought'}
-        <span>{open ? '▾' : '▸'}</span>
-        {live && <span className="caret" style={{ marginLeft: 2 }} />}
-      </button>
-      {open && (
-        <div
+        <span
           className="serif"
           style={{
-            marginTop: 4,
             fontStyle: 'italic',
             fontSize: 12,
-            lineHeight: 1.55,
-            color: 'var(--ink-4)',
-            whiteSpace: 'pre-wrap',
+            color: isReasoning ? 'var(--ink-4)' : 'var(--ink-3)',
           }}
         >
-          {text}
-        </div>
+          {label}
+        </span>
+        {live && <span className="caret" />}
+        <span style={{ flex: 1 }} />
+        <span className="smallcaps" style={{ fontSize: 9, color: 'var(--ink-4)' }}>
+          {sizeText}
+        </span>
+        <span
+          aria-hidden
+          style={{
+            color: 'var(--ink-4)',
+            fontFamily: 'var(--serif)',
+            fontStyle: 'italic',
+            fontSize: 12,
+          }}
+        >
+          ⤢
+        </span>
+      </button>
+      {open && (
+        <ViewerOverlay
+          title={viewerTitle}
+          value={text}
+          onClose={() => setOpen(false)}
+        />
       )}
-    </div>
+    </>
   );
 }
 
@@ -912,10 +958,11 @@ function NestedToolCard({ tc }: { tc: NestedToolCall }) {
             </pre>
           )}
           {tc.status === 'ok' && tc.result !== undefined && (
-            <>
-              <div className="smallcaps" style={{ margin: '6px 0 3px' }}>result</div>
-              <JsonView value={tc.result} />
-            </>
+            <ValueRow
+              label="result"
+              value={tc.result}
+              viewerTitle={`${tc.tool || 'tool'} · result`}
+            />
           )}
           {tc.status === 'err' && tc.error && (
             <>
@@ -977,7 +1024,7 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
           {run.error}
         </pre>
       )}
-      {hasFinal && <FinalOutputBlock outputs={run.outputs} />}
+      {hasFinal && <FinalOutputBlock workflow={workflow} outputs={run.outputs} />}
       <details open={!hasFinal} style={{ marginTop: hasFinal ? 4 : 0 }}>
         <summary
           className="smallcaps"
@@ -1021,14 +1068,33 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
                   {nr.error}
                 </pre>
               )}
-              <Section label="inputs" json={nr.inputs} />
-              <Section label="outputs" json={nr.outputs} />
-              {nr.logs.length > 0 && <Section label="logs" json={nr.logs} />}
+              <NodeIOBlock
+                workflow={workflow}
+                nodeId={nr.node_id}
+                nodeName={nodeName}
+                inputs={nr.inputs}
+                outputs={nr.outputs}
+                logs={nr.logs.length ? nr.logs : undefined}
+              />
               {nr.llm_calls.length > 0 && (
-                <Section label={`llm calls (${nr.llm_calls.length})`} json={nr.llm_calls} />
+                <div style={{ marginBottom: 8 }}>
+                  <div className="smallcaps" style={{ marginBottom: 4 }}>llm calls</div>
+                  <ValueRow
+                    label={`${nr.llm_calls.length} ${nr.llm_calls.length === 1 ? 'call' : 'calls'}`}
+                    value={nr.llm_calls}
+                    viewerTitle={`${nodeName} · llm calls`}
+                  />
+                </div>
               )}
               {nr.tool_calls.length > 0 && (
-                <Section label={`tool calls (${nr.tool_calls.length})`} json={nr.tool_calls} />
+                <div style={{ marginBottom: 8 }}>
+                  <div className="smallcaps" style={{ marginBottom: 4 }}>tool calls</div>
+                  <ValueRow
+                    label={`${nr.tool_calls.length} ${nr.tool_calls.length === 1 ? 'call' : 'calls'}`}
+                    value={nr.tool_calls}
+                    viewerTitle={`${nodeName} · tool calls`}
+                  />
+                </div>
               )}
             </div>
           </details>
@@ -1043,11 +1109,130 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
   );
 }
 
-function Section({ label, json }: { label: string; json: unknown }) {
+/**
+ * Render a node's input/output ports as a compact, clickable list.
+ *
+ * Each port becomes one row (name · type · preview · size · expand affordance);
+ * clicking opens the full value in the viewer overlay. For inputs, we resolve
+ * the upstream edge so the row also shows "from upstream-node.port" — clarifying
+ * that the value is a duplicate of an upstream output without re-rendering it.
+ */
+function PortList({
+  values,
+  schema,
+  workflow,
+  nodeId,
+  nodeName,
+  kind,
+}: {
+  values: Record<string, unknown>;
+  schema: IOPort[];
+  workflow: WorkflowDetail;
+  nodeId: string;
+  nodeName: string;
+  kind: 'inputs' | 'outputs';
+}) {
+  const seen = new Set<string>();
+  const rows: React.ReactNode[] = [];
+  for (const port of schema) {
+    seen.add(port.name);
+    if (!(port.name in values)) continue;
+    let subtitle: string | undefined;
+    if (kind === 'inputs') {
+      const e = workflow.edges.find(
+        (x) => x.to_node_id === nodeId && x.to_input === port.name,
+      );
+      if (e) {
+        const src = workflow.nodes.find((n) => n.id === e.from_node_id);
+        subtitle = `from ${src?.name ?? e.from_node_id}.${e.from_output}`;
+      }
+    }
+    rows.push(
+      <PortRow
+        key={port.name}
+        name={port.name}
+        typeHint={port.type_hint}
+        value={values[port.name]}
+        viewerTitle={`${nodeName} · ${kind === 'inputs' ? 'in' : 'out'} · ${port.name}`}
+        viewerSubtitle={subtitle}
+      />,
+    );
+  }
+  // any keys present at runtime but not declared in the schema
+  for (const k of Object.keys(values)) {
+    if (seen.has(k)) continue;
+    rows.push(
+      <PortRow
+        key={k}
+        name={k}
+        value={values[k]}
+        viewerTitle={`${nodeName} · ${kind === 'inputs' ? 'in' : 'out'} · ${k}`}
+      />,
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <span
+        className="serif"
+        style={{ fontStyle: 'italic', fontSize: 11.5, color: 'var(--ink-4)' }}
+      >
+        none
+      </span>
+    );
+  }
+  return <div>{rows}</div>;
+}
+
+function NodeIOBlock({
+  workflow,
+  nodeId,
+  nodeName,
+  inputs,
+  outputs,
+  logs,
+}: {
+  workflow: WorkflowDetail;
+  nodeId: string;
+  nodeName: string;
+  inputs?: Record<string, unknown>;
+  outputs?: Record<string, unknown>;
+  logs?: unknown[];
+}) {
+  const schemaNode = workflow.nodes.find((n) => n.id === nodeId);
   return (
-    <div style={{ marginBottom: 8 }}>
-      <div className="smallcaps" style={{ marginBottom: 3 }}>{label}</div>
-      <JsonView value={json} />
-    </div>
+    <>
+      {inputs !== undefined && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="smallcaps" style={{ marginBottom: 4 }}>inputs</div>
+          <PortList
+            values={inputs}
+            schema={schemaNode?.inputs ?? []}
+            workflow={workflow}
+            nodeId={nodeId}
+            nodeName={nodeName}
+            kind="inputs"
+          />
+        </div>
+      )}
+      {outputs !== undefined && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="smallcaps" style={{ marginBottom: 4 }}>outputs</div>
+          <PortList
+            values={outputs}
+            schema={schemaNode?.outputs ?? []}
+            workflow={workflow}
+            nodeId={nodeId}
+            nodeName={nodeName}
+            kind="outputs"
+          />
+        </div>
+      )}
+      {logs && logs.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="smallcaps" style={{ marginBottom: 3 }}>logs</div>
+          <JsonView value={logs} />
+        </div>
+      )}
+    </>
   );
 }

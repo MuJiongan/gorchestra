@@ -57,7 +57,7 @@ def run(inputs, ctx):
 
 `ctx` provides:
 
-- `ctx.call_llm(model, prompt, tools=[...])` — runs an LLM inside the node. Pass tool names (`"shell"`, `"web_search"`, `"web_fetch"`) in the `tools` list; the LLM running inside the node decides when to invoke them. The names you pass here must also be in the node's `tools_enabled` list (otherwise the runner strips them). Returns a dict with keys `content` (str), `tool_calls_made` (list), `usage`, `cost`. Pass `model=""` to use the user's default node model.
+- `ctx.call_llm(prompt, tools=[...])` — runs an LLM inside the node. Pass tool names (`"shell"`, `"web_search"`, `"web_fetch"`) in the `tools` list; the LLM running inside the node decides when to invoke them. The names you pass here must also be in the node's `tools_enabled` list (otherwise the runner strips them). Returns a dict with keys `content` (str), `tool_calls_made` (list), `usage`, `cost`. The model defaults to the user's configured default node model; pass `model="..."` only when a node genuinely needs a different one.
 - `ctx.log("...")` — appends a visible line to the run log.
 - `ctx.workdir` — `pathlib.Path` to a per-run scratch directory.
 
@@ -70,7 +70,6 @@ The returned dict's keys must exactly match the declared output names. Set an ou
 ```python
 def run(inputs, ctx):
     response = ctx.call_llm(
-        model="",
         prompt=f"Fetch {inputs['url']} and return a 3-sentence summary.",
         tools=["web_fetch"],
     )
@@ -90,7 +89,6 @@ There are no conditional edges in this system. To branch, the upstream node sets
 ```python
 def run(inputs, ctx):
     response = ctx.call_llm(
-        model="",
         prompt=f"Classify this email: {inputs['email']}\\nReply with one word: refund, support, or sales.",
     )
     label = response["content"].strip().lower()
@@ -116,7 +114,7 @@ def run(inputs, ctx):
     items = inputs["items"]
     def _one(item):
         ctx.log(f"summarising {item}")
-        return ctx.call_llm(model="", prompt=f"summarise: {item}")["content"]
+        return ctx.call_llm(prompt=f"summarise: {item}")["content"]
     with ThreadPoolExecutor(max_workers=min(8, len(items) or 1)) as pool:
         summaries = list(pool.map(_one, items))
     return {"summaries": summaries}
@@ -131,7 +129,7 @@ plan the graph before mutating. break the request into focused steps, and branch
 - snake_case node names: `transcribe_audio`, `extract_actions`, `send_email`.
 - one-line italic-feel `description`, e.g. *scans the input folder for .m4a files*.
 - prefer several focused nodes over one giant node.
-- leave `model=""` for nodes that don't call an LLM, or to use the user's default.
+- omit the `model` arg in `ctx.call_llm` to use the user's default node model — only set it when a node genuinely needs a different one.
 - only enable tools a node actually uses. `shell` is dangerous — opt in deliberately.
 - *parallelise independent `ctx.call_llm` calls* — `ctx` is thread-safe, the run panel renders concurrent calls as parallel cards, and a sequential loop of N llm calls is almost always wrong. applies to loops over lists *and* to nodes that just happen to make multiple unrelated calls.
 - *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`), `inputs`/`outputs`, and — for any node that calls `ctx.call_llm` — the matching `tools_enabled`. nodes are not placeholders to fill in later.

@@ -23,6 +23,53 @@ const STATE_CLASS: Record<NodeRunStatus, string> = {
   skipped: 'skipped',
 };
 
+/**
+ * One-line, human-readable summary of a run for the `recent runs` list —
+ * shown instead of the opaque run id when the run has populated inputs.
+ * Falls back to the run id (short hex prefix) when there's nothing useful
+ * in the inputs to show.
+ *
+ * Returns { text, kind } so the caller can style the fallback ("id") in
+ * mono font, distinct from the populated-input previews.
+ */
+function summariseRun(run: Run): { text: string; kind: 'value' | 'keys' | 'id' } {
+  const populated = Object.entries(run.inputs ?? {}).filter(
+    ([, v]) => v !== null && v !== undefined && v !== '',
+  );
+
+  if (populated.length === 0) {
+    return { text: run.id.slice(0, 8), kind: 'id' };
+  }
+
+  const previewValue = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+
+  const truncate = (s: string, n: number) =>
+    s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
+
+  if (populated.length === 1) {
+    const [, v] = populated[0];
+    return {
+      text: truncate(previewValue(v).replace(/\s+/g, ' ').trim(), 60),
+      kind: 'value',
+    };
+  }
+
+  const KEYS_TO_SHOW = 3;
+  const shown = populated.slice(0, KEYS_TO_SHOW).map(([k]) => k).join(', ');
+  const extra = populated.length - KEYS_TO_SHOW;
+  return {
+    text: extra > 0 ? `${shown} + ${extra} more` : shown,
+    kind: 'keys',
+  };
+}
+
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
   inset: 0,
@@ -442,7 +489,7 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           </div>
         ))}
 
-        {currentRun && (
+        {currentRun && !historicalRun && (
           <RunTraceCard
             workflow={workflow}
             runId={currentRun.id}
@@ -454,35 +501,92 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           />
         )}
 
-        {historicalRun && !currentRun && (
+        {historicalRun && (
           <HistoricalRunCard workflow={workflow} run={historicalRun} />
         )}
 
         {history.length > 0 && (
           <div style={{ marginTop: 22 }}>
-            <div className="smallcaps" style={{ marginBottom: 8 }}>recent runs</div>
-            {history.slice(0, 8).map((h) => (
-              <button
-                key={h.id}
-                onClick={async () => setHistoricalRun(await api.getRun(h.id))}
-                style={{
-                  display: 'flex',
-                  width: '100%',
-                  padding: '6px 0',
-                  alignItems: 'baseline',
-                  gap: 8,
-                  background: 'transparent',
-                  border: 0,
-                  borderBottom: '1px solid var(--rule-2)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-4)' }}>{h.id.slice(0, 8)}</span>
-                <span style={{ flex: 1 }} />
-                <span className="smallcaps" style={{ fontSize: 9 }}>{h.status}</span>
-              </button>
-            ))}
+            <div
+              className="smallcaps"
+              style={{
+                marginBottom: 8,
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 8,
+              }}
+            >
+              <span>recent runs</span>
+              {historicalRun && currentRun && (
+                <button
+                  type="button"
+                  onClick={() => setHistoricalRun(null)}
+                  className="smallcaps"
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--ink-4)',
+                    background: 'transparent',
+                    border: 0,
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                  title="clear historical view"
+                >
+                  back to current ×
+                </button>
+              )}
+            </div>
+            {history.slice(0, 8).map((h) => {
+              const isActive = historicalRun?.id === h.id;
+              const summary = summariseRun(h);
+              const isId = summary.kind === 'id';
+              return (
+                <button
+                  key={h.id}
+                  onClick={async () => {
+                    if (isActive) {
+                      setHistoricalRun(null);
+                      return;
+                    }
+                    setHistoricalRun(await api.getRun(h.id));
+                  }}
+                  style={{
+                    display: 'flex',
+                    width: '100%',
+                    padding: '6px 8px',
+                    margin: '0 -8px',
+                    alignItems: 'baseline',
+                    gap: 8,
+                    background: isActive ? 'var(--paper-2)' : 'transparent',
+                    border: 0,
+                    borderBottom: '1px solid var(--rule-2)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                  title={isId ? h.id : summary.text}
+                >
+                  <span
+                    className={isId ? 'mono' : 'serif'}
+                    style={{
+                      fontSize: isId ? 10.5 : 12.5,
+                      color: isActive
+                        ? 'var(--ink)'
+                        : isId
+                          ? 'var(--ink-4)'
+                          : 'var(--ink-2)',
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {summary.text}
+                  </span>
+                  <span className="smallcaps" style={{ fontSize: 9 }}>{h.status}</span>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

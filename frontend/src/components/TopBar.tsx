@@ -76,7 +76,7 @@ export function TopBar({
         padding: '0 22px',
         gap: 18,
         position: 'relative',
-        zIndex: 10,
+        zIndex: 60,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>

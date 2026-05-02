@@ -23,13 +23,7 @@ EmitFn = Callable[[dict], None]
 
 
 class _ToolsProxy:
-    """Direct (non-LLM) access: ctx.tools.shell(command="..."), etc.
-
-    No ``tools_enabled`` gating here on purpose — that allow-list bounds the
-    LLM's tool surface inside ``call_llm``. Direct calls come from Python the
-    orchestrator wrote (or the user hand-edited); the call site itself is the
-    opt-in.
-    """
+    """Direct (non-LLM) access: ctx.tools.shell(command="..."), etc."""
 
     def __init__(self, recorder: list[dict], on_event: EmitFn, lock: threading.Lock):
         self._recorder = recorder
@@ -109,12 +103,10 @@ class Ctx:
         self,
         workdir: Path,
         default_model: str,
-        allowed_tools: list[str] | None = None,
         on_event: EmitFn | None = None,
     ):
         self.workdir = workdir
         self._default_model = default_model
-        self._allowed_tools = allowed_tools  # None = all tools allowed
         self._on_event: EmitFn = on_event or (lambda ev: None)
         self.logs: list[str] = []
         self.llm_calls: list[dict] = []
@@ -136,8 +128,6 @@ class Ctx:
         m = model or self._default_model
         if not m:
             raise RuntimeError("call_llm: no model specified and no default configured")
-        if self._allowed_tools is not None and tools:
-            tools = [t for t in tools if t in self._allowed_tools]
 
         call_id = self._next_call_id()
         self._on_event(

@@ -132,7 +132,6 @@ def main() -> None:
         output_ports = node.get("outputs") or []
         config = node.get("config") or {}
         node_model = config.get("model") or default_model
-        allowed_tools = config.get("tools_enabled") or None
 
         if node_id == input_node_id:
             node_inputs: dict = dict(user_inputs)
@@ -180,7 +179,6 @@ def main() -> None:
         ctx = Ctx(
             workdir=workdir,
             default_model=node_model,
-            allowed_tools=allowed_tools,
             on_event=_on_event,
         )
         start = time.time()

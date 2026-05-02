@@ -27,7 +27,6 @@ interface NodeData {
   isInput: boolean;
   isOutput: boolean;
   selected: boolean;
-  tools: string[];
   state: DotState;
   [key: string]: unknown;
 }
@@ -117,7 +116,7 @@ function NodeBlock({ data, selected }: NodeProps) {
       <PortSection ports={ins} side="top" />
 
       {/* header — name on its own line so a long name doesn't push the role
-          badge or tools row out of the card. */}
+          badge out of the card. */}
       <div
         style={{
           padding: '10px 14px 8px',
@@ -158,22 +157,6 @@ function NodeBlock({ data, selected }: NodeProps) {
             </span>
           )}
         </div>
-        {d.tools && d.tools.length > 0 && (
-          <div
-            className="smallcaps"
-            title={d.tools.join(' · ')}
-            style={{
-              fontSize: 9,
-              color: 'var(--ink-4)',
-              marginTop: 4,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {d.tools.join(' · ')}
-          </div>
-        )}
       </div>
 
       {/* description */}
@@ -245,9 +228,6 @@ function estimateNodeHeight(n: WorkflowDetail['nodes'][number]): number {
   if (n.inputs.length > 0) h += 8 + n.inputs.length * 16;
   // Header: padding 10/14/8 + name line at fontSize 12 (~16px line box).
   h += 10 + 16 + 8;
-  if (n.config?.tools_enabled?.length) {
-    h += 4 /* marginTop */ + 11 /* tools row line box */;
-  }
   if (n.description) {
     h += 1; // header bottom border (only present when description follows)
     // Description block: padding 6/14/10, fontSize 12.5, lineHeight 1.4.
@@ -417,7 +397,6 @@ function CanvasInner({ detail, selectedNodeId, onSelectNode, nodeStates }: Canva
             isInput: n.id === detail.input_node_id,
             isOutput: n.id === detail.output_node_id,
             selected: n.id === selectedNodeId,
-            tools: n.config.tools_enabled ?? [],
             state,
           } satisfies NodeData,
         };

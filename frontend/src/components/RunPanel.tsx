@@ -5,6 +5,7 @@ import type {
 import { api } from '../api';
 import { JsonView } from './JsonView';
 import { PortRow, ValueRow, ViewerOverlay } from './ValueViewer';
+import { NodeIOBlock } from './NodeIOBlock';
 
 interface Props {
   workflow: WorkflowDetail;
@@ -21,6 +22,53 @@ const STATE_CLASS: Record<NodeRunStatus, string> = {
   error: 'error',
   skipped: 'skipped',
 };
+
+/**
+ * One-line, human-readable summary of a run for the `recent runs` list —
+ * shown instead of the opaque run id when the run has populated inputs.
+ * Falls back to the run id (short hex prefix) when there's nothing useful
+ * in the inputs to show.
+ *
+ * Returns { text, kind } so the caller can style the fallback ("id") in
+ * mono font, distinct from the populated-input previews.
+ */
+function summariseRun(run: Run): { text: string; kind: 'value' | 'keys' | 'id' } {
+  const populated = Object.entries(run.inputs ?? {}).filter(
+    ([, v]) => v !== null && v !== undefined && v !== '',
+  );
+
+  if (populated.length === 0) {
+    return { text: run.id.slice(0, 8), kind: 'id' };
+  }
+
+  const previewValue = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+
+  const truncate = (s: string, n: number) =>
+    s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
+
+  if (populated.length === 1) {
+    const [, v] = populated[0];
+    return {
+      text: truncate(previewValue(v).replace(/\s+/g, ' ').trim(), 60),
+      kind: 'value',
+    };
+  }
+
+  const KEYS_TO_SHOW = 3;
+  const shown = populated.slice(0, KEYS_TO_SHOW).map(([k]) => k).join(', ');
+  const extra = populated.length - KEYS_TO_SHOW;
+  return {
+    text: extra > 0 ? `${shown} + ${extra} more` : shown,
+    kind: 'keys',
+  };
+}
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
@@ -441,7 +489,7 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           </div>
         ))}
 
-        {currentRun && (
+        {currentRun && !historicalRun && (
           <RunTraceCard
             workflow={workflow}
             runId={currentRun.id}
@@ -453,35 +501,92 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           />
         )}
 
-        {historicalRun && !currentRun && (
+        {historicalRun && (
           <HistoricalRunCard workflow={workflow} run={historicalRun} />
         )}
 
         {history.length > 0 && (
           <div style={{ marginTop: 22 }}>
-            <div className="smallcaps" style={{ marginBottom: 8 }}>recent runs</div>
-            {history.slice(0, 8).map((h) => (
-              <button
-                key={h.id}
-                onClick={async () => setHistoricalRun(await api.getRun(h.id))}
-                style={{
-                  display: 'flex',
-                  width: '100%',
-                  padding: '6px 0',
-                  alignItems: 'baseline',
-                  gap: 8,
-                  background: 'transparent',
-                  border: 0,
-                  borderBottom: '1px solid var(--rule-2)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-4)' }}>{h.id.slice(0, 8)}</span>
-                <span style={{ flex: 1 }} />
-                <span className="smallcaps" style={{ fontSize: 9 }}>{h.status}</span>
-              </button>
-            ))}
+            <div
+              className="smallcaps"
+              style={{
+                marginBottom: 8,
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 8,
+              }}
+            >
+              <span>recent runs</span>
+              {historicalRun && currentRun && (
+                <button
+                  type="button"
+                  onClick={() => setHistoricalRun(null)}
+                  className="smallcaps"
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--ink-4)',
+                    background: 'transparent',
+                    border: 0,
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                  title="clear historical view"
+                >
+                  back to current ×
+                </button>
+              )}
+            </div>
+            {history.slice(0, 8).map((h) => {
+              const isActive = historicalRun?.id === h.id;
+              const summary = summariseRun(h);
+              const isId = summary.kind === 'id';
+              return (
+                <button
+                  key={h.id}
+                  onClick={async () => {
+                    if (isActive) {
+                      setHistoricalRun(null);
+                      return;
+                    }
+                    setHistoricalRun(await api.getRun(h.id));
+                  }}
+                  style={{
+                    display: 'flex',
+                    width: '100%',
+                    padding: '6px 8px',
+                    margin: '0 -8px',
+                    alignItems: 'baseline',
+                    gap: 8,
+                    background: isActive ? 'var(--paper-2)' : 'transparent',
+                    border: 0,
+                    borderBottom: '1px solid var(--rule-2)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                  title={isId ? h.id : summary.text}
+                >
+                  <span
+                    className={isId ? 'mono' : 'serif'}
+                    style={{
+                      fontSize: isId ? 10.5 : 12.5,
+                      color: isActive
+                        ? 'var(--ink)'
+                        : isId
+                          ? 'var(--ink-4)'
+                          : 'var(--ink-2)',
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {summary.text}
+                  </span>
+                  <span className="smallcaps" style={{ fontSize: 9 }}>{h.status}</span>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1217,130 +1322,3 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
   );
 }
 
-/**
- * Render a node's input/output ports as a compact, clickable list.
- *
- * Each port becomes one row (name · type · preview · size · expand affordance);
- * clicking opens the full value in the viewer overlay. For inputs, we resolve
- * the upstream edge so the row also shows "from upstream-node.port" — clarifying
- * that the value is a duplicate of an upstream output without re-rendering it.
- */
-function PortList({
-  values,
-  schema,
-  workflow,
-  nodeId,
-  nodeName,
-  kind,
-}: {
-  values: Record<string, unknown>;
-  schema: IOPort[];
-  workflow: WorkflowDetail;
-  nodeId: string;
-  nodeName: string;
-  kind: 'inputs' | 'outputs';
-}) {
-  const seen = new Set<string>();
-  const rows: React.ReactNode[] = [];
-  for (const port of schema) {
-    seen.add(port.name);
-    if (!(port.name in values)) continue;
-    let subtitle: string | undefined;
-    if (kind === 'inputs') {
-      const e = workflow.edges.find(
-        (x) => x.to_node_id === nodeId && x.to_input === port.name,
-      );
-      if (e) {
-        const src = workflow.nodes.find((n) => n.id === e.from_node_id);
-        subtitle = `from ${src?.name ?? e.from_node_id}.${e.from_output}`;
-      }
-    }
-    rows.push(
-      <PortRow
-        key={port.name}
-        name={port.name}
-        typeHint={port.type_hint}
-        value={values[port.name]}
-        viewerTitle={`${nodeName} · ${kind === 'inputs' ? 'in' : 'out'} · ${port.name}`}
-        viewerSubtitle={subtitle}
-      />,
-    );
-  }
-  // any keys present at runtime but not declared in the schema
-  for (const k of Object.keys(values)) {
-    if (seen.has(k)) continue;
-    rows.push(
-      <PortRow
-        key={k}
-        name={k}
-        value={values[k]}
-        viewerTitle={`${nodeName} · ${kind === 'inputs' ? 'in' : 'out'} · ${k}`}
-      />,
-    );
-  }
-  if (rows.length === 0) {
-    return (
-      <span
-        className="serif"
-        style={{ fontStyle: 'italic', fontSize: 11.5, color: 'var(--ink-4)' }}
-      >
-        none
-      </span>
-    );
-  }
-  return <div>{rows}</div>;
-}
-
-function NodeIOBlock({
-  workflow,
-  nodeId,
-  nodeName,
-  inputs,
-  outputs,
-  logs,
-}: {
-  workflow: WorkflowDetail;
-  nodeId: string;
-  nodeName: string;
-  inputs?: Record<string, unknown>;
-  outputs?: Record<string, unknown>;
-  logs?: unknown[];
-}) {
-  const schemaNode = workflow.nodes.find((n) => n.id === nodeId);
-  return (
-    <>
-      {inputs !== undefined && (
-        <div style={{ marginBottom: 8 }}>
-          <div className="smallcaps" style={{ marginBottom: 4 }}>inputs</div>
-          <PortList
-            values={inputs}
-            schema={schemaNode?.inputs ?? []}
-            workflow={workflow}
-            nodeId={nodeId}
-            nodeName={nodeName}
-            kind="inputs"
-          />
-        </div>
-      )}
-      {outputs !== undefined && (
-        <div style={{ marginBottom: 8 }}>
-          <div className="smallcaps" style={{ marginBottom: 4 }}>outputs</div>
-          <PortList
-            values={outputs}
-            schema={schemaNode?.outputs ?? []}
-            workflow={workflow}
-            nodeId={nodeId}
-            nodeName={nodeName}
-            kind="outputs"
-          />
-        </div>
-      )}
-      {logs && logs.length > 0 && (
-        <div style={{ marginBottom: 8 }}>
-          <div className="smallcaps" style={{ marginBottom: 3 }}>logs</div>
-          <JsonView value={logs} />
-        </div>
-      )}
-    </>
-  );
-}

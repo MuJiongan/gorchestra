@@ -83,7 +83,7 @@ Execution:
 - Nodes run in a single workflow-level subprocess (`python -m app.runner.child`). Independent nodes execute concurrently via a `ThreadPoolExecutor`: as each node finishes, its successors decrement their pending-input count and any whose count reaches zero are submitted next. Topology is still respected — a node only starts once every upstream node has produced its outputs (or been skipped). Within a node, `ctx.call_llm` is thread-safe and node code is encouraged to parallelise per-item LLM calls with its own pool.
 - The child emits structured JSON-line events to stdout (`run_started`, `node_started`, `log`, `llm_call_started`, `llm_call_chunk`, `llm_call_finished`, `tool_call_started`, `tool_call_finished`, `node_finished`, `run_finished`). Concurrent calls are disambiguated by `call_id`. The parent appends events to an in-memory pub/sub keyed by `run_id`.
 - Cancellation only — there is no per-node or workflow-level timeout enforcement; a hung node hangs the run until the user clicks **cancel** (parent SIGTERMs the child; child raises `KeyboardInterrupt` and emits a `cancelled` `run_finished`).
-- A `tools_enabled` allow-list on the node config is enforced: tools requested in `ctx.call_llm(tools=[...])` that aren't in the allow-list are silently dropped before the call.
+- Node code decides which runtime tools it uses by referencing them in its own Python (`ctx.call_llm(tools=[...])` or `ctx.tools.X(...)`); the runner forwards whatever the code passes verbatim. Unknown tool names are surfaced as errors by the registry rather than silently filtered.
 
 ### 5.3 `call_llm`
 - Single function over OpenRouter.
@@ -106,7 +106,7 @@ Tools live in a single Python registry (`app.runner.tools.REGISTRY`). Each is ca
 - **Top bar:** product mark, current session picker (dropdown showing all workflows; in-line rename + delete on hover), status pill, **settings**, **new**, **run** buttons. No left sidebar.
 - **Chat panel (left, ~420px):** orchestrator conversation. Renders one growing assistant bubble per turn that interleaves reasoning blocks (collapsible), prose paragraphs, and tool-call cards (with status: pending / ok / err). Header shows current session name + the orchestrator model in use. Send + cancel buttons.
 - **Canvas (React Flow via `@xyflow/react`):** nodes draggable for position only. Edges drawn between named ports. Visual run-state dots per node (idle / running / success / error / skipped). Input/output nodes badged. **Topology mutations (add/remove nodes, add/remove edges, set input/output role) are owned exclusively by the orchestrator** — the canvas does not expose them as direct user actions. Position drags persist via `PATCH /api/nodes/{id}`.
-- **Node side panel** (on click): tabs for **code** (Monaco editor), **i/o** (read-only port shape), **config** (model + tools_enabled checkboxes for `shell` / `web_search` / `web_fetch`), **last run** (logs, LLM calls, tool calls). Saves set `mark_user_edited`.
+- **Node side panel** (on click): tabs for **code** (Monaco editor), **i/o** (read-only port shape), **config** (model), **last run** (logs, LLM calls, tool calls). Saves set `mark_user_edited`.
 - **Run panel** (slides in from right; expandable to fullscreen): input form generated from the input node, run / cancel buttons, live per-node trace, final output viewer with total cost, recent-runs list (last 20 stored, last 8 surfaced).
 - **Settings:** OpenRouter API key, parallel.ai API key, default orchestrator model, default node model. Stored in browser `localStorage`, **not** the backend DB. Forwarded to the backend as request headers (`x-openrouter-key`, `x-parallel-key`, `x-orchestrator-model`, `x-node-model`); a per-request middleware copies them into `os.environ` for the lifetime of the request. The DB has a legacy `settings` table that acts as a backwards-compat fallback only.
 
@@ -130,7 +130,7 @@ Workflow   { id, name, created_at, input_node_id, output_node_id }
 Node       { id, workflow_id, name, description, code,
              inputs:  [{name, type_hint, required: bool}],
              outputs: [{name, type_hint, required: bool}],
-             config:  { model, tools_enabled: [str] },
+             config:  { model },
              position: {x, y},
              user_edited_at: datetime? }
 
@@ -165,10 +165,10 @@ view_graph()                           -> {workflow_id, name, input_node_id, out
 view_node_details(node_id)             -> {full node record incl. code, user_edited, position}
 
 # graph mutation (blocked while a workflow run is in progress)
-add_node(name, description, code, inputs, outputs, model, tools_enabled) -> {node_id, node}
+add_node(name, description, code, inputs, outputs, model) -> {node_id, node}
 remove_node(node_id)
 rename_node(node_id, new_name)
-configure_node(node_id, **partial_fields)        # description, code, inputs, outputs, model, tools_enabled
+configure_node(node_id, **partial_fields)        # description, code, inputs, outputs, model
 add_edge(from_node_id, from_output, to_node_id, to_input) -> {edge_id, edge}
 remove_edge(edge_id)
 set_input_node(node_id)

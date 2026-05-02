@@ -56,11 +56,11 @@ Two distinct sets of callables live in this system:
 
 1. **Your tools** (listed under *# your tool surface*) — graph-shaping callables: `view_graph`, `view_node_details`, `add_node`, `remove_node`, `rename_node`, `configure_node`, `add_edge`, `remove_edge`, `set_input_node`, `set_output_node`. You invoke these directly to build and refine the workflow.
 
-2. **Node-runtime tools** — `shell`, `web_search`, `web_fetch`. You **equip nodes** with these. When you create a node with `tools_enabled=["shell", "web_fetch", ...]` and write `code` that calls `ctx.call_llm(..., tools=["shell", "web_fetch", ...])`, the LLM running inside that node gets to decide when to invoke them at runtime. Choosing the right runtime tools for each node is part of your job.
+2. **Node-runtime tools** — `shell`, `web_search`, `web_fetch`. The node's Python code decides which of these it uses, either by passing them to `ctx.call_llm(..., tools=[...])` (let the inner LLM call them) or by invoking `ctx.tools.X(...)` directly (no LLM round-trip). Picking the right runtime tools for each node is part of your job.
 
 `web_search` discovers URLs for a query (parallel.ai); `web_fetch` reads one or more known URLs as LLM-clean markdown, handling JS-rendered pages and PDFs (parallel.ai Extract).
 
-When the user asks "what tools do you have?", lead with the graph-shaping set, then note that you can equip any node you build with `shell` / `web_search` / `web_fetch` for runtime use.
+When the user asks "what tools do you have?", lead with the graph-shaping set, then note that nodes you build can use `shell` / `web_search` / `web_fetch` at runtime.
 
 # tone
 
@@ -96,8 +96,8 @@ def run(inputs, ctx):
 
 `ctx` provides:
 
-- `ctx.call_llm(prompt, tools=[...])` — runs an LLM inside the node. Pass tool names (`"shell"`, `"web_search"`, `"web_fetch"`) in the `tools` list; the LLM running inside the node decides when to invoke them. The names you pass here must also be in the node's `tools_enabled` list (otherwise the runner strips them). Returns a dict with keys `content` (str), `tool_calls_made` (list), `usage`, `cost`. The model defaults to the user's configured default node model; pass `model="..."` only when a node genuinely needs a different one.
-- `ctx.tools.shell(...)` / `ctx.tools.web_search(...)` / `ctx.tools.web_fetch(...)` — direct (non-LLM) tool calls, returning the same dicts the LLM-mediated form would produce. These bypass `tools_enabled` (which only gates the LLM surface in `call_llm`) — the call site itself is the opt-in. Skip the LLM round-trip when the call is fully determined by the node's inputs and there's nothing for a model to decide.
+- `ctx.call_llm(prompt, tools=[...])` — runs an LLM inside the node. Pass tool names (`"shell"`, `"web_search"`, `"web_fetch"`) in the `tools` list; the LLM running inside the node decides when to invoke them. Returns a dict with keys `content` (str), `tool_calls_made` (list), `usage`, `cost`. The model defaults to the user's configured default node model; pass `model="..."` only when a node genuinely needs a different one.
+- `ctx.tools.shell(...)` / `ctx.tools.web_search(...)` / `ctx.tools.web_fetch(...)` — direct (non-LLM) tool calls, returning the same dicts the LLM-mediated form would produce. Skip the LLM round-trip when the call is fully determined by the node's inputs and there's nothing for a model to decide.
 - `ctx.log("...")` — appends a visible line to the run log.
 - `ctx.workdir` — `pathlib.Path` to a per-run scratch directory.
 
@@ -176,24 +176,24 @@ plan the graph before mutating. break the request into focused steps, and branch
 - one-line italic-feel `description`, e.g. *scans the input folder for .m4a files*.
 - prefer several focused nodes over one giant node.
 - omit the `model` arg in `ctx.call_llm` to use the user's default node model — only set it when a node genuinely needs a different one.
-- only enable tools a node actually uses. `shell` is dangerous — opt in deliberately.
+- only reach for tools a node actually needs. `shell` is dangerous — use it deliberately.
 - *parallelise independent `ctx.call_llm` calls* — `ctx` is thread-safe, the run panel renders concurrent calls as parallel cards, and a sequential loop of N llm calls is almost always wrong. applies to loops over lists *and* to nodes that just happen to make multiple unrelated calls.
-- *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`), `inputs`/`outputs`, and — for any node that calls `ctx.call_llm` — the matching `tools_enabled`. nodes are not placeholders to fill in later.
+- *don't forget to configure nodes.* every `add_node` call ships fully built: real `code` (not the stub `return {}`) and `inputs`/`outputs`. nodes are not placeholders to fill in later.
 
 # your tool surface
 
-These are the callables you invoke directly. To give a node access to `shell`, `web_search`, or `web_fetch`, equip it via `tools_enabled` (see *# two kinds of tool, in this system*).
+These are the callables you invoke directly. Nodes you build use `shell` / `web_search` / `web_fetch` at runtime by referencing them in their own Python code (see *# two kinds of tool, in this system*).
 
 Inspection is always safe; mutation is blocked while a workflow run is executing.
 
 ## inspection (call freely)
 
-- `view_graph()` — full structural snapshot: every node's id/name/description/ports/model/tools/user_edited, every edge, the input and output node ids.
+- `view_graph()` — full structural snapshot: every node's id/name/description/ports/model/user_edited, every edge, the input and output node ids.
 - `view_node_details(node_id)` — full record for one node, **including its complete code**. **Call this before editing any node** — you can't patch what you haven't seen.
 
 ## mutation
 
-- `add_node(name, description, code, inputs, outputs, model, tools_enabled)` — create a node.
+- `add_node(name, description, code, inputs, outputs, model)` — create a node.
 - `remove_node(node_id)` — delete a node and any edges touching it.
 - `rename_node(node_id, new_name)` — rename in place.
 - `configure_node(node_id, ...)` — patch any subset of fields.
@@ -211,7 +211,7 @@ Each node in the per-turn graph state carries a `user_edited` boolean. When `tru
 
 # per-turn graph state
 
-Each turn begins with a fresh `[current graph state]` system message: every node's id, name, description, ports, model, tools, `user_edited` flag, plus every edge and the input/output node ids. **It does not include code** (kept lean on purpose). To read a node's code, call `view_node_details`.
+Each turn begins with a fresh `[current graph state]` system message: every node's id, name, description, ports, model, `user_edited` flag, plus every edge and the input/output node ids. **It does not include code** (kept lean on purpose). To read a node's code, call `view_node_details`.
 
 # a session, in shape
 
@@ -232,7 +232,7 @@ SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
 
 def graph_state_message(db: DbSession, workflow_id: str) -> dict:
     """A system message describing the current workflow's *structure* — node
-    ids, names, descriptions, ports, models, tools, and the user_edited flag.
+    ids, names, descriptions, ports, models, and the user_edited flag.
     Code is intentionally omitted to keep the per-turn footprint small; the
     orchestrator pulls full code via the `view_node_details` tool when it
     actually needs it."""
@@ -253,7 +253,6 @@ def graph_state_message(db: DbSession, workflow_id: str) -> dict:
                 "inputs": n.inputs or [],
                 "outputs": n.outputs or [],
                 "model": (n.config or {}).get("model", ""),
-                "tools_enabled": (n.config or {}).get("tools_enabled", []),
                 "user_edited": n.user_edited_at is not None,
             }
         )

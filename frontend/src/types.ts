@@ -6,7 +6,6 @@ export interface IOPort {
 
 export interface NodeConfig {
   model: string;
-  tools_enabled: string[];
 }
 
 export interface WFNode {

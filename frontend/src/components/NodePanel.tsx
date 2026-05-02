@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import type { WFNode, IOPort, WorkflowDetail, Run, NodeRun, NodeRunStatus } from '../types';
 import { api } from '../api';
-import { JsonView } from './JsonView';
+import { NodeIOBlock } from './NodeIOBlock';
+import { ValueRow } from './ValueViewer';
 
 const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
   pending: 'idle',
@@ -211,7 +212,7 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
           </div>
         )}
 
-        {tab === 'last run' && <LastRunsTab nodeId={node.id} workflowId={workflow.id} />}
+        {tab === 'last run' && <LastRunsTab nodeId={node.id} workflow={workflow} />}
       </div>
     </div>
   );
@@ -282,10 +283,16 @@ interface NodeRunEntry {
   nodeRun: NodeRun;
 }
 
-function LastRunsTab({ nodeId, workflowId }: { nodeId: string; workflowId: string }) {
+function LastRunsTab({ nodeId, workflow }: { nodeId: string; workflow: WorkflowDetail }) {
+  const workflowId = workflow.id;
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openRunId, setOpenRunId] = useState<string | null>(null);
+  // Tracks whether we've already auto-opened the most-recent run for this
+  // node selection. Without this, an effect that auto-opens whenever
+  // `openRunId === null` would immediately re-open a run the user just
+  // collapsed, making the row feel uncloseable.
+  const [autoOpened, setAutoOpened] = useState(false);
 
   const refresh = async () => {
     try {
@@ -300,6 +307,7 @@ function LastRunsTab({ nodeId, workflowId }: { nodeId: string; workflowId: strin
   useEffect(() => {
     setRuns(null);
     setOpenRunId(null);
+    setAutoOpened(false);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId, workflowId]);
@@ -316,12 +324,14 @@ function LastRunsTab({ nodeId, workflowId }: { nodeId: string; workflowId: strin
     return out;
   }, [runs, nodeId]);
 
-  // Auto-open the most recent entry once it's loaded.
+  // Auto-open the most recent entry once, on first load. After that the
+  // user owns the open/closed state — collapsing a row stays collapsed.
   useEffect(() => {
-    if (openRunId === null && entries.length > 0) {
+    if (!autoOpened && entries.length > 0) {
       setOpenRunId(entries[0].run.id);
+      setAutoOpened(true);
     }
-  }, [entries, openRunId]);
+  }, [entries, autoOpened]);
 
   if (runs === null && !error) {
     return (
@@ -391,6 +401,7 @@ function LastRunsTab({ nodeId, workflowId }: { nodeId: string; workflowId: strin
         {entries.map(({ run, nodeRun }) => (
           <NodeRunCard
             key={run.id}
+            workflow={workflow}
             run={run}
             nodeRun={nodeRun}
             open={openRunId === run.id}
@@ -405,16 +416,20 @@ function LastRunsTab({ nodeId, workflowId }: { nodeId: string; workflowId: strin
 }
 
 function NodeRunCard({
+  workflow,
   run,
   nodeRun,
   open,
   onToggle,
 }: {
+  workflow: WorkflowDetail;
   run: Run;
   nodeRun: NodeRun;
   open: boolean;
   onToggle: () => void;
 }) {
+  const nodeName =
+    workflow.nodes.find((n) => n.id === nodeRun.node_id)?.name ?? nodeRun.node_id;
   return (
     <div
       style={{
@@ -484,47 +499,48 @@ function NodeRunCard({
           }}
         >
           {nodeRun.error && (
-            <div style={{ marginBottom: 10 }}>
-              <div className="smallcaps" style={{ marginBottom: 3, color: 'var(--state-err)' }}>
-                error
-              </div>
-              <pre
-                className="mono"
-                style={{
-                  fontSize: 11,
-                  color: 'var(--state-err)',
-                  whiteSpace: 'pre-wrap',
-                  margin: 0,
-                  padding: 8,
-                  background: 'var(--paper-2)',
-                  border: '1px solid var(--rule-2)',
-                  borderRadius: 3,
-                }}
-              >
-                {nodeRun.error}
-              </pre>
+            <pre
+              className="mono"
+              style={{
+                fontSize: 11,
+                color: 'var(--state-err)',
+                whiteSpace: 'pre-wrap',
+                margin: '0 0 8px',
+              }}
+            >
+              {nodeRun.error}
+            </pre>
+          )}
+          <NodeIOBlock
+            workflow={workflow}
+            nodeId={nodeRun.node_id}
+            nodeName={nodeName}
+            inputs={nodeRun.inputs}
+            outputs={nodeRun.outputs}
+            logs={nodeRun.logs.length ? nodeRun.logs : undefined}
+          />
+          {nodeRun.llm_calls.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="smallcaps" style={{ marginBottom: 4 }}>llm calls</div>
+              <ValueRow
+                label={`${nodeRun.llm_calls.length} ${nodeRun.llm_calls.length === 1 ? 'call' : 'calls'}`}
+                value={nodeRun.llm_calls}
+                viewerTitle={`${nodeName} · llm calls`}
+              />
             </div>
           )}
-          <RunSection label="inputs" json={nodeRun.inputs} />
-          <RunSection label="outputs" json={nodeRun.outputs} />
-          {nodeRun.logs.length > 0 && <RunSection label="logs" json={nodeRun.logs} />}
-          {nodeRun.llm_calls.length > 0 && (
-            <RunSection label={`llm calls (${nodeRun.llm_calls.length})`} json={nodeRun.llm_calls} />
-          )}
           {nodeRun.tool_calls.length > 0 && (
-            <RunSection label={`tool calls (${nodeRun.tool_calls.length})`} json={nodeRun.tool_calls} />
+            <div style={{ marginBottom: 8 }}>
+              <div className="smallcaps" style={{ marginBottom: 4 }}>tool calls</div>
+              <ValueRow
+                label={`${nodeRun.tool_calls.length} ${nodeRun.tool_calls.length === 1 ? 'call' : 'calls'}`}
+                value={nodeRun.tool_calls}
+                viewerTitle={`${nodeName} · tool calls`}
+              />
+            </div>
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function RunSection({ label, json }: { label: string; json: unknown }) {
-  return (
-    <div style={{ marginBottom: 8 }}>
-      <div className="smallcaps" style={{ marginBottom: 3 }}>{label}</div>
-      <JsonView value={json} />
     </div>
   );
 }

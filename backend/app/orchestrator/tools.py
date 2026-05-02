@@ -85,7 +85,6 @@ def _node_full(n: models.Node) -> dict:
         "outputs": n.outputs or [],
         "config": {
             "model": cfg.get("model", ""),
-            "tools_enabled": cfg.get("tools_enabled", []),
         },
         "position": n.position or {"x": 0, "y": 0},
         "user_edited": n.user_edited_at is not None,
@@ -118,7 +117,6 @@ def add_node(
     inputs: list[dict] | None = None,
     outputs: list[dict] | None = None,
     model: str = "",
-    tools_enabled: list[str] | None = None,
 ) -> dict:
     """Create a new node in the workflow. Returns the new node id + summary."""
     _get_workflow(db, wid)
@@ -131,7 +129,6 @@ def add_node(
         outputs=_normalize_ports(outputs, "output"),
         config={
             "model": model or "",
-            "tools_enabled": list(tools_enabled or []),
         },
         position=_next_position(db, wid),
     )
@@ -176,7 +173,6 @@ def configure_node(
     inputs: list[dict] | None = None,
     outputs: list[dict] | None = None,
     model: str | None = None,
-    tools_enabled: list[str] | None = None,
 ) -> dict:
     """Patch any subset of a node's mutable fields."""
     n = _get_node(db, wid, node_id)
@@ -191,11 +187,10 @@ def configure_node(
     cfg = dict(n.config or {})
     if model is not None:
         cfg["model"] = model
-    if tools_enabled is not None:
-        cfg["tools_enabled"] = list(tools_enabled)
-    # Drop any legacy timeout_s from existing rows so we don't carry a
-    # field that no longer means anything.
+    # Drop legacy fields that no longer mean anything so we don't carry
+    # them forward on existing rows.
     cfg.pop("timeout_s", None)
+    cfg.pop("tools_enabled", None)
     n.config = cfg
     db.commit()
     db.refresh(n)
@@ -270,7 +265,7 @@ def set_output_node(db: DbSession, wid: str, *, node_id: str) -> dict:
 
 def view_graph(db: DbSession, wid: str) -> dict:
     """Return a structural snapshot of the workflow — node ids, names,
-    descriptions, ports, model, tools_enabled, user_edited. Code is intentionally
+    descriptions, ports, model, user_edited. Code is intentionally
     omitted; call `view_node_details` for the full body of a specific node."""
     w = _get_workflow(db, wid)
     nodes = []
@@ -284,7 +279,6 @@ def view_graph(db: DbSession, wid: str) -> dict:
                 "inputs": n.inputs or [],
                 "outputs": n.outputs or [],
                 "model": cfg.get("model", ""),
-                "tools_enabled": cfg.get("tools_enabled", []),
                 "user_edited": n.user_edited_at is not None,
             }
         )
@@ -351,7 +345,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "name": "view_graph",
             "description": (
                 "Return a structural snapshot of the workflow — node ids, names, descriptions, "
-                "ports, model, tools_enabled, user_edited. Useful to confirm state mid-turn after "
+                "ports, model, user_edited. Useful to confirm state mid-turn after "
                 "a sequence of mutations, or to plan before editing. Does not include node code; "
                 "use `view_node_details` for that."
             ),
@@ -364,7 +358,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "name": "view_node_details",
             "description": (
                 "Return the full record for one node — including its complete code, full config "
-                "(model, tools_enabled), and user_edited status. Call this before "
+                "(model), and user_edited status. Call this before "
                 "editing a node so you can make targeted patches instead of guessing at its "
                 "current state, especially when `user_edited` is true."
             ),
@@ -395,10 +389,6 @@ TOOL_SCHEMAS: dict[str, dict] = {
                     "inputs": _PORT_SCHEMA,
                     "outputs": _PORT_SCHEMA,
                     "model": {"type": "string", "description": "OpenRouter model id (optional)"},
-                    "tools_enabled": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": ["shell", "web_search", "web_fetch"]},
-                    },
                 },
                 "required": ["name"],
             },
@@ -436,8 +426,8 @@ TOOL_SCHEMAS: dict[str, dict] = {
         "function": {
             "name": "configure_node",
             "description": (
-                "Patch any subset of a node's fields (description, code, inputs, outputs, model, "
-                "tools_enabled). Omitted fields are left unchanged."
+                "Patch any subset of a node's fields (description, code, inputs, outputs, model). "
+                "Omitted fields are left unchanged."
             ),
             "parameters": {
                 "type": "object",
@@ -448,10 +438,6 @@ TOOL_SCHEMAS: dict[str, dict] = {
                     "inputs": _PORT_SCHEMA,
                     "outputs": _PORT_SCHEMA,
                     "model": {"type": "string"},
-                    "tools_enabled": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": ["shell", "web_search", "web_fetch"]},
-                    },
                 },
                 "required": ["node_id"],
             },

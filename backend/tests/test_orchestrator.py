@@ -56,7 +56,7 @@ def test_add_node_creates_with_normalized_ports(db, workflow):
     # output's required defaults to False (since kind="output")
     assert n.outputs == [{"name": "files", "type_hint": "list[path]", "required": False}]
     # default config sane
-    assert n.config["tools_enabled"] == []
+    assert "tools_enabled" not in n.config
     assert "timeout_s" not in n.config
 
 
@@ -126,13 +126,12 @@ def test_rename_and_configure_node(db, workflow):
         node_id=nid,
         description="patched",
         model="anthropic/claude-sonnet-4.5",
-        tools_enabled=["web_fetch"],
     )
     n = db.get(models.Node, nid)
     assert n.name == "new"
     assert n.description == "patched"
     assert n.config["model"] == "anthropic/claude-sonnet-4.5"
-    assert n.config["tools_enabled"] == ["web_fetch"]
+    assert "tools_enabled" not in n.config
     assert "timeout_s" not in n.config
 
 
@@ -327,7 +326,6 @@ def test_view_node_details_returns_full_untruncated_code(db, workflow):
         description="huge node",
         code=long_code,
         model="anthropic/claude-sonnet-4.5",
-        tools_enabled=["shell"],
     )["node_id"]
 
     res = orch_tools.view_node_details(db, workflow.id, node_id=nid)
@@ -338,7 +336,7 @@ def test_view_node_details_returns_full_untruncated_code(db, workflow):
     assert res["code"] == long_code
     assert "<truncated" not in res["code"]
     assert res["config"]["model"] == "anthropic/claude-sonnet-4.5"
-    assert res["config"]["tools_enabled"] == ["shell"]
+    assert "tools_enabled" not in res["config"]
     assert "timeout_s" not in res["config"]
     assert res["user_edited"] is False
     assert res["user_edited_at"] is None
@@ -745,18 +743,20 @@ def test_system_prompt_lists_node_runtime_tool_signatures():
 
 def test_system_prompt_distinguishes_orchestrator_vs_node_tools():
     """The prompt must teach the orchestrator that there are two kinds of
-    tool: ones it invokes directly (graph mutators) and ones it *equips
-    nodes with* (shell/web_search/web_fetch). The framing is constructive — the
-    orchestrator has agency over both — but the categories are distinct.
+    tool: ones it invokes directly (graph mutators) and ones the *node code*
+    uses at runtime (shell/web_search/web_fetch). The framing is constructive —
+    the orchestrator has agency over both — but the categories are distinct.
     """
     p = SYSTEM_PROMPT
     lower = p.lower()
     # The graph-shaping tools belong to the orchestrator.
     assert "your tools" in lower
-    # Node-runtime tools are talked about as something nodes get *equipped*
-    # with, not something the orchestrator calls directly.
-    assert "equip" in lower
-    assert "tools_enabled" in lower
+    # The runtime tool names are still mentioned alongside the node-code contract.
+    assert "shell" in lower
+    assert "web_search" in lower
+    assert "web_fetch" in lower
+    # tools_enabled is gone — make sure it didn't sneak back in.
+    assert "tools_enabled" not in lower
     # And the prompt directly instructs how to answer "what tools do you have?"
     assert "what tools do you have" in lower
 

@@ -11,7 +11,6 @@ class IOPort(BaseModel):
 
 class NodeConfig(BaseModel):
     model: str = ""
-    tools_enabled: list[str] = Field(default_factory=list)
 
 
 class Position(BaseModel):

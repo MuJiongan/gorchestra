@@ -13,6 +13,39 @@ interface Props {
   onStart: (inputs: Record<string, unknown>) => void;
   onCancel: () => void;
   onClose: () => void;
+  onSendErrorToOrchestrator: (message: string) => void;
+}
+
+function buildErrorPrompt({
+  runId, nodeName, error,
+}: {
+  runId: string;
+  nodeName?: string;
+  error: string;
+}): string {
+  const shortId = runId.slice(0, 8);
+  if (nodeName) {
+    return `Node "${nodeName}" failed during run ${shortId}:\n\n${error}\n\nPlease diagnose and fix.`;
+  }
+  return `Run ${shortId} failed:\n\n${error}\n\nPlease diagnose.`;
+}
+
+function SendErrorButton({
+  onClick,
+}: {
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="ed-btn ed-btn--mini"
+      onClick={onClick}
+      title="forward this error to the orchestrator"
+      style={{ marginBottom: 10 }}
+    >
+      send to orchestrator <span className="ed-btn__mark">→</span>
+    </button>
+  );
 }
 
 const STATE_CLASS: Record<NodeRunStatus, string> = {
@@ -25,14 +58,14 @@ const STATE_CLASS: Record<NodeRunStatus, string> = {
 
 /**
  * One-line, human-readable summary of a run for the `recent runs` list —
- * shown instead of the opaque run id when the run has populated inputs.
- * Falls back to the run id (short hex prefix) when there's nothing useful
- * in the inputs to show.
+ * a preview of the input values, shown instead of the opaque run id. Falls
+ * back to the run id (short hex prefix) when there's nothing useful in the
+ * inputs to show.
  *
  * Returns { text, kind } so the caller can style the fallback ("id") in
  * mono font, distinct from the populated-input previews.
  */
-function summariseRun(run: Run): { text: string; kind: 'value' | 'keys' | 'id' } {
+function summariseRun(run: Run): { text: string; kind: 'value' | 'id' } {
   const populated = Object.entries(run.inputs ?? {}).filter(
     ([, v]) => v !== null && v !== undefined && v !== '',
   );
@@ -53,21 +86,23 @@ function summariseRun(run: Run): { text: string; kind: 'value' | 'keys' | 'id' }
   const truncate = (s: string, n: number) =>
     s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 
+  const TOTAL_BUDGET = 60;
+
   if (populated.length === 1) {
     const [, v] = populated[0];
     return {
-      text: truncate(previewValue(v).replace(/\s+/g, ' ').trim(), 60),
+      text: truncate(previewValue(v).replace(/\s+/g, ' ').trim(), TOTAL_BUDGET),
       kind: 'value',
     };
   }
 
-  const KEYS_TO_SHOW = 3;
-  const shown = populated.slice(0, KEYS_TO_SHOW).map(([k]) => k).join(', ');
-  const extra = populated.length - KEYS_TO_SHOW;
-  return {
-    text: extra > 0 ? `${shown} + ${extra} more` : shown,
-    kind: 'keys',
-  };
+  // Multi-input: join short value previews so the user can recognise the run
+  // by what they actually typed, not by the port names (which repeat across runs).
+  const perValueBudget = Math.max(8, Math.floor(TOTAL_BUDGET / populated.length));
+  const joined = populated
+    .map(([, v]) => truncate(previewValue(v).replace(/\s+/g, ' ').trim(), perValueBudget))
+    .join(' · ');
+  return { text: truncate(joined, TOTAL_BUDGET), kind: 'value' };
 }
 
 const PANEL_STYLE: React.CSSProperties = {
@@ -367,12 +402,24 @@ function aggregateEvents(events: RunEvent[]): NodeTrace[] {
   return order.map((id) => byId.get(id)!).filter(Boolean);
 }
 
-export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: Props) {
+export function RunPanel({
+  workflow,
+  currentRun,
+  onStart,
+  onCancel,
+  onClose,
+  onSendErrorToOrchestrator,
+}: Props) {
   const inputNode = workflow.nodes.find((n) => n.id === workflow.input_node_id);
   const inputPorts: IOPort[] = inputNode?.inputs ?? [];
   const [values, setValues] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<Run[]>([]);
   const [historicalRun, setHistoricalRun] = useState<Run | null>(null);
+
+  // Only consider currentRun ours if it belongs to the workflow we're showing.
+  // Guards against stale state leaking across workflows (e.g. after deleting
+  // the active workflow and auto-switching to another).
+  const ownRun = currentRun && currentRun.workflow_id === workflow.id ? currentRun : null;
 
   useEffect(() => {
     api.listRuns(workflow.id).then(setHistory).catch(() => {});
@@ -381,18 +428,18 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
   // Refresh history when a run finishes so the latest one shows up.
   useEffect(() => {
     if (
-      currentRun &&
-      (currentRun.status === 'success' ||
-        currentRun.status === 'error' ||
-        currentRun.status === 'cancelled')
+      ownRun &&
+      (ownRun.status === 'success' ||
+        ownRun.status === 'error' ||
+        ownRun.status === 'cancelled')
     ) {
       api.listRuns(workflow.id).then(setHistory).catch(() => {});
     }
-  }, [currentRun?.status, workflow.id]);
+  }, [ownRun?.status, workflow.id]);
 
   const traces = useMemo(
-    () => (currentRun ? aggregateEvents(currentRun.events) : []),
-    [currentRun?.events],
+    () => (ownRun ? aggregateEvents(ownRun.events) : []),
+    [ownRun?.events],
   );
 
   const start = () => {
@@ -416,8 +463,8 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
     onStart(inputs);
   };
 
-  const running = currentRun?.status === 'running' || currentRun?.status === 'pending';
-  const status = currentRun?.status;
+  const running = ownRun?.status === 'running' || ownRun?.status === 'pending';
+  const status = ownRun?.status;
 
   return (
     <div className="fade-in" style={PANEL_STYLE}>
@@ -489,20 +536,25 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
           </div>
         ))}
 
-        {currentRun && !historicalRun && (
+        {ownRun && !historicalRun && (
           <RunTraceCard
             workflow={workflow}
-            runId={currentRun.id}
-            status={currentRun.status}
-            error={currentRun.error}
-            cost={currentRun.totalCost}
-            outputs={currentRun.finalOutputs}
+            runId={ownRun.id}
+            status={ownRun.status}
+            error={ownRun.error}
+            cost={ownRun.totalCost}
+            outputs={ownRun.finalOutputs}
             traces={traces}
+            onSendErrorToOrchestrator={onSendErrorToOrchestrator}
           />
         )}
 
         {historicalRun && (
-          <HistoricalRunCard workflow={workflow} run={historicalRun} />
+          <HistoricalRunCard
+            workflow={workflow}
+            run={historicalRun}
+            onSendErrorToOrchestrator={onSendErrorToOrchestrator}
+          />
         )}
 
         {history.length > 0 && (
@@ -517,7 +569,7 @@ export function RunPanel({ workflow, currentRun, onStart, onCancel, onClose }: P
               }}
             >
               <span>recent runs</span>
-              {historicalRun && currentRun && (
+              {historicalRun && ownRun && (
                 <button
                   type="button"
                   onClick={() => setHistoricalRun(null)}
@@ -681,7 +733,7 @@ function FinalOutputBlock({
 }
 
 function RunTraceCard({
-  workflow, runId, status, error, cost, outputs, traces,
+  workflow, runId, status, error, cost, outputs, traces, onSendErrorToOrchestrator,
 }: {
   workflow: WorkflowDetail;
   runId: string;
@@ -690,6 +742,7 @@ function RunTraceCard({
   cost: number;
   outputs: Record<string, unknown> | null;
   traces: NodeTrace[];
+  onSendErrorToOrchestrator: (message: string) => void;
 }) {
   const hasFinal = status === 'success' && outputs && Object.keys(outputs).length > 0;
   return (
@@ -723,12 +776,17 @@ function RunTraceCard({
         </span>
       </div>
       {error && (
-        <pre
-          className="mono"
-          style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 10px' }}
-        >
-          {error}
-        </pre>
+        <>
+          <pre
+            className="mono"
+            style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+          >
+            {error}
+          </pre>
+          <SendErrorButton
+            onClick={() => onSendErrorToOrchestrator(buildErrorPrompt({ runId, error }))}
+          />
+        </>
       )}
       {hasFinal && outputs && <FinalOutputBlock workflow={workflow} outputs={outputs} />}
       <details style={{ marginTop: hasFinal ? 4 : 0 }} open={!hasFinal}>
@@ -768,12 +826,21 @@ function RunTraceCard({
                 </summary>
                 <div style={{ padding: '8px 0' }}>
                   {t.error && (
-                    <pre
-                      className="mono"
-                      style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
-                    >
-                      {t.error}
-                    </pre>
+                    <>
+                      <pre
+                        className="mono"
+                        style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+                      >
+                        {t.error}
+                      </pre>
+                      <SendErrorButton
+                        onClick={() =>
+                          onSendErrorToOrchestrator(
+                            buildErrorPrompt({ runId, nodeName, error: t.error ?? '' }),
+                          )
+                        }
+                      />
+                    </>
                   )}
                   <NodeIOBlock
                     workflow={workflow}
@@ -1199,7 +1266,13 @@ function NestedToolCard({ tc }: { tc: NestedToolCall }) {
   );
 }
 
-function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: Run }) {
+function HistoricalRunCard({
+  workflow, run, onSendErrorToOrchestrator,
+}: {
+  workflow: WorkflowDetail;
+  run: Run;
+  onSendErrorToOrchestrator: (message: string) => void;
+}) {
   const hasFinal = run.status === 'success' && run.outputs && Object.keys(run.outputs).length > 0;
   return (
     <div
@@ -1230,12 +1303,19 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
         </span>
       </div>
       {run.error && (
-        <pre
-          className="mono"
-          style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 10px' }}
-        >
-          {run.error}
-        </pre>
+        <>
+          <pre
+            className="mono"
+            style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+          >
+            {run.error}
+          </pre>
+          <SendErrorButton
+            onClick={() =>
+              onSendErrorToOrchestrator(buildErrorPrompt({ runId: run.id, error: run.error ?? '' }))
+            }
+          />
+        </>
       )}
       {hasFinal && <FinalOutputBlock workflow={workflow} outputs={run.outputs} />}
       <details open={!hasFinal} style={{ marginTop: hasFinal ? 4 : 0 }}>
@@ -1274,12 +1354,21 @@ function HistoricalRunCard({ workflow, run }: { workflow: WorkflowDetail; run: R
             </summary>
             <div style={{ padding: '8px 0' }}>
               {nr.error && (
-                <pre
-                  className="mono"
-                  style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
-                >
-                  {nr.error}
-                </pre>
+                <>
+                  <pre
+                    className="mono"
+                    style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
+                  >
+                    {nr.error}
+                  </pre>
+                  <SendErrorButton
+                    onClick={() =>
+                      onSendErrorToOrchestrator(
+                        buildErrorPrompt({ runId: run.id, nodeName, error: nr.error ?? '' }),
+                      )
+                    }
+                  />
+                </>
               )}
               <NodeIOBlock
                 workflow={workflow}

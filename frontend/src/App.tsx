@@ -361,6 +361,7 @@ export default function App() {
     if (id === activeId) {
       setActiveId(null);
       setDetail(null);
+      setCurrentRun(null);
     }
     setChatByWorkflow((prev) => {
       const { [id]: _, ...rest } = prev;
@@ -435,6 +436,12 @@ export default function App() {
   const cancelRun = async () => {
     if (!currentRun) return;
     try { await api.cancelRun(currentRun.id); } catch { /* ignore */ }
+  };
+
+  /** Forward an error from a run/node into the orchestrator chat as a user message. */
+  const sendErrorToOrchestrator = (message: string) => {
+    setChatOpen(true);
+    handleSend(message);
   };
 
   const selectedNode = detail?.nodes.find((n) => n.id === selectedNodeId);
@@ -564,6 +571,7 @@ export default function App() {
                     onStart={startRun}
                     onCancel={cancelRun}
                     onClose={() => setShowRunPanel(false)}
+                    onSendErrorToOrchestrator={sendErrorToOrchestrator}
                   />
                 )}
                 {detail && !selectedNode && !showRunPanel && (

@@ -24,7 +24,7 @@ def shell(command: str, timeout: int = 30) -> dict:
         }
 
 
-def web_search(query: str, max_results: int = 5) -> dict:
+def web_search(query: str, max_results: int = 10) -> dict:
     """Web search via parallel.ai."""
     api_key = os.getenv("PARALLEL_API_KEY", "")
     if not api_key:
@@ -103,7 +103,7 @@ TOOL_SCHEMAS = {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "max_results": {"type": "integer", "default": 5},
+                    "max_results": {"type": "integer", "default": 10},
                 },
                 "required": ["query"],
             },

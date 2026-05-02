@@ -1,4 +1,4 @@
-.PHONY: install backend frontend test clean
+.PHONY: install backend frontend dev test clean
 
 VENV := backend/.venv
 
@@ -13,6 +13,12 @@ backend:
 
 frontend:
 	cd frontend && npm run dev
+
+dev:
+	@trap 'kill 0' INT TERM EXIT; \
+	$(MAKE) backend & \
+	$(MAKE) frontend & \
+	wait
 
 test:
 	cd backend && .venv/bin/pytest -q

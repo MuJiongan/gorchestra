@@ -20,7 +20,7 @@ function looksLikeMarkdown(s: string): boolean {
   return MD_HINTS.test(s);
 }
 
-function StringValue({ value }: { value: string }) {
+function StringValue({ value, large = false }: { value: string; large?: boolean }) {
   if (looksLikeMarkdown(value)) {
     return (
       <div
@@ -32,7 +32,7 @@ function StringValue({ value }: { value: string }) {
           marginTop: 2,
         }}
       >
-        <Markdown>{value}</Markdown>
+        <Markdown large={large}>{value}</Markdown>
       </div>
     );
   }
@@ -41,7 +41,7 @@ function StringValue({ value }: { value: string }) {
       <pre
         className="mono"
         style={{
-          fontSize: 11,
+          fontSize: large ? 13 : 11,
           color: 'var(--ink-2)',
           margin: '2px 0 0',
           padding: '6px 10px',
@@ -63,7 +63,7 @@ function StringValue({ value }: { value: string }) {
         fontFamily: 'var(--serif)',
         fontStyle: 'italic',
         color: 'var(--ink-2)',
-        fontSize: 13,
+        fontSize: large ? 14.5 : 13,
       }}
     >
       {value}
@@ -75,15 +75,17 @@ function PrimitiveBadge({
   text,
   color,
   mono,
+  large = false,
 }: {
   text: string;
   color: string;
   mono?: boolean;
+  large?: boolean;
 }) {
   return (
     <span
       className={mono ? 'mono' : 'smallcaps'}
-      style={{ color, fontSize: mono ? 11.5 : 9 }}
+      style={{ color, fontSize: mono ? (large ? 13 : 11.5) : (large ? 10.5 : 9) }}
     >
       {text}
     </span>
@@ -93,38 +95,39 @@ function PrimitiveBadge({
 interface NodeProps {
   value: unknown;
   level: number;
+  large?: boolean;
 }
 
-function Node({ value, level }: NodeProps) {
+function Node({ value, level, large = false }: NodeProps) {
   if (value === null) {
-    return <PrimitiveBadge text="null" color="var(--ink-4)" />;
+    return <PrimitiveBadge text="null" color="var(--ink-4)" large={large} />;
   }
   if (value === undefined) {
-    return <PrimitiveBadge text="undefined" color="var(--ink-4)" />;
+    return <PrimitiveBadge text="undefined" color="var(--ink-4)" large={large} />;
   }
   if (typeof value === 'boolean') {
     return (
-      <PrimitiveBadge text={String(value)} color="var(--accent-ink)" />
+      <PrimitiveBadge text={String(value)} color="var(--accent-ink)" large={large} />
     );
   }
   if (typeof value === 'number') {
     return (
       <span
         className="mono"
-        style={{ color: 'var(--ink)', fontSize: 11.5 }}
+        style={{ color: 'var(--ink)', fontSize: large ? 13 : 11.5 }}
       >
         {value}
       </span>
     );
   }
   if (typeof value === 'string') {
-    return <StringValue value={value} />;
+    return <StringValue value={value} large={large} />;
   }
   if (Array.isArray(value)) {
-    return <ArrayNode value={value} level={level} />;
+    return <ArrayNode value={value} level={level} large={large} />;
   }
   if (typeof value === 'object') {
-    return <ObjectNode value={value as Record<string, unknown>} level={level} />;
+    return <ObjectNode value={value as Record<string, unknown>} level={level} large={large} />;
   }
   return (
     <span className="mono" style={{ color: 'var(--ink-3)' }}>
@@ -137,10 +140,12 @@ function Disclosure({
   open,
   onToggle,
   summary,
+  large = false,
 }: {
   open: boolean;
   onToggle: () => void;
   summary: React.ReactNode;
+  large?: boolean;
 }) {
   return (
     <button
@@ -156,7 +161,7 @@ function Disclosure({
         gap: 4,
         color: 'var(--ink-3)',
         fontFamily: 'var(--sans)',
-        fontSize: 10.5,
+        fontSize: large ? 12 : 10.5,
       }}
     >
       <span style={{ width: 10, display: 'inline-block', textAlign: 'center', color: 'var(--ink-4)' }}>
@@ -167,7 +172,7 @@ function Disclosure({
   );
 }
 
-function ArrayNode({ value, level }: { value: unknown[]; level: number }) {
+function ArrayNode({ value, level, large = false }: { value: unknown[]; level: number; large?: boolean }) {
   const [open, setOpen] = useState(level < 2);
   if (value.length === 0) {
     return <span style={{ color: 'var(--ink-4)' }}>[ ]</span>;
@@ -177,8 +182,9 @@ function ArrayNode({ value, level }: { value: unknown[]; level: number }) {
       <Disclosure
         open={open}
         onToggle={() => setOpen((v) => !v)}
+        large={large}
         summary={
-          <span className="smallcaps" style={{ fontSize: 9 }}>
+          <span className="smallcaps" style={{ fontSize: large ? 10.5 : 9 }}>
             array · {value.length}
           </span>
         }
@@ -197,7 +203,7 @@ function ArrayNode({ value, level }: { value: unknown[]; level: number }) {
               <span
                 className="mono"
                 style={{
-                  fontSize: 10,
+                  fontSize: large ? 11.5 : 10,
                   color: 'var(--ink-4)',
                   marginRight: 8,
                 }}
@@ -205,7 +211,7 @@ function ArrayNode({ value, level }: { value: unknown[]; level: number }) {
                 [{i}]
               </span>
               <span style={{ display: 'inline-block', verticalAlign: 'top' }}>
-                <Node value={v} level={level + 1} />
+                <Node value={v} level={level + 1} large={large} />
               </span>
             </div>
           ))}
@@ -218,9 +224,11 @@ function ArrayNode({ value, level }: { value: unknown[]; level: number }) {
 function ObjectNode({
   value,
   level,
+  large = false,
 }: {
   value: Record<string, unknown>;
   level: number;
+  large?: boolean;
 }) {
   const keys = Object.keys(value);
   const [open, setOpen] = useState(level < 2);
@@ -232,8 +240,9 @@ function ObjectNode({
       <Disclosure
         open={open}
         onToggle={() => setOpen((v) => !v)}
+        large={large}
         summary={
-          <span className="smallcaps" style={{ fontSize: 9 }}>
+          <span className="smallcaps" style={{ fontSize: large ? 10.5 : 9 }}>
             object · {keys.length} {keys.length === 1 ? 'key' : 'keys'}
           </span>
         }
@@ -252,7 +261,7 @@ function ObjectNode({
               <span
                 className="mono"
                 style={{
-                  fontSize: 11,
+                  fontSize: large ? 12.5 : 11,
                   color: 'var(--ink)',
                   marginRight: 8,
                 }}
@@ -260,7 +269,7 @@ function ObjectNode({
                 {k}
               </span>
               <span style={{ display: 'inline-block', verticalAlign: 'top', maxWidth: '100%' }}>
-                <Node value={value[k]} level={level + 1} />
+                <Node value={value[k]} level={level + 1} large={large} />
               </span>
             </div>
           ))}
@@ -270,7 +279,7 @@ function ObjectNode({
   );
 }
 
-export function JsonView({ value }: { value: unknown }) {
+export function JsonView({ value, large = false }: { value: unknown; large?: boolean }) {
   // Top level — wrap in a paper card matching the prior <pre> styling.
   return (
     <div
@@ -279,13 +288,13 @@ export function JsonView({ value }: { value: unknown }) {
         background: 'var(--paper)',
         border: '1px solid var(--rule-2)',
         borderRadius: 3,
-        fontSize: 12,
+        fontSize: large ? 14 : 12,
         color: 'var(--ink-2)',
         maxWidth: '100%',
         overflowX: 'auto',
       }}
     >
-      <Node value={value} level={0} />
+      <Node value={value} level={0} large={large} />
     </div>
   );
 }

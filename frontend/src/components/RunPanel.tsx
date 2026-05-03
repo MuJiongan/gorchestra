@@ -763,6 +763,8 @@ function RunTraceCard({
               status === 'success' ? 'var(--state-ok)' :
               status === 'error' ? 'var(--state-err)' :
               status === 'cancelled' ? 'var(--ink-3)' : 'var(--ink-3)',
+            fontSize:
+              status === 'success' || status === 'error' ? 14 : undefined,
           }}
         >
           {status === 'success' ? '✓ result' :
@@ -824,7 +826,13 @@ function RunTraceCard({
                     {typeof t.duration_ms === 'number' ? ` · ${t.duration_ms}ms` : ''}
                   </span>
                 </summary>
-                <div style={{ padding: '8px 0' }}>
+                <div
+                  style={{
+                    padding: '8px 0 8px 14px',
+                    marginLeft: 4,
+                    borderLeft: '1px solid var(--rule-2)',
+                  }}
+                >
                   {t.error && (
                     <>
                       <pre
@@ -854,14 +862,20 @@ function RunTraceCard({
                     <LLMCallCard key={c.call_id} call={c} index={idx} />
                   ))}
                   {t.directToolCalls.length > 0 && (
-                    <div style={{ margin: '10px 0 0' }}>
-                      <div className="smallcaps" style={{ marginBottom: 4 }}>
-                        tool calls — direct
-                      </div>
+                    <details
+                      style={{ margin: '10px 0 0' }}
+                      open={t.directToolCalls.length <= 5}
+                    >
+                      <summary
+                        className="smallcaps"
+                        style={{ cursor: 'pointer', padding: '2px 0', marginBottom: 4 }}
+                      >
+                        tool calls — direct · {t.directToolCalls.length}
+                      </summary>
                       {t.directToolCalls.map((dtc) => (
                         <DirectToolCard key={dtc.call_id} call={dtc} />
                       ))}
-                    </div>
+                    </details>
                   )}
                 </div>
               </details>
@@ -1008,11 +1022,17 @@ function CallRoundView({
         />
       )}
       {round.toolCalls.length > 0 && (
-        <div style={{ marginTop: 8 }}>
+        <details style={{ marginTop: 8 }} open={round.toolCalls.length <= 5}>
+          <summary
+            className="smallcaps"
+            style={{ cursor: 'pointer', padding: '2px 0', marginBottom: 4, fontSize: 9 }}
+          >
+            tool calls · {round.toolCalls.length}
+          </summary>
           {round.toolCalls.map((tc) => (
             <NestedToolCard key={`${tc.round}-${tc.tc_index}`} tc={tc} />
           ))}
-        </div>
+        </details>
       )}
     </div>
   );
@@ -1129,6 +1149,18 @@ function DirectToolCard({ call }: { call: DirectToolCall }) {
       onClick={() => setExpanded((v) => !v)}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 10,
+            display: 'inline-block',
+            textAlign: 'center',
+            color: 'var(--ink-4)',
+            fontSize: 10,
+          }}
+        >
+          {expanded ? '▾' : '▸'}
+        </span>
         <span className="mono" style={{ color: 'var(--accent-ink)', fontSize: 10.5 }}>
           {call.tool || '…'}
         </span>
@@ -1204,6 +1236,18 @@ function NestedToolCard({ tc }: { tc: NestedToolCall }) {
       onClick={() => setExpanded((v) => !v)}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 10,
+            display: 'inline-block',
+            textAlign: 'center',
+            color: 'var(--ink-4)',
+            fontSize: 10,
+          }}
+        >
+          {expanded ? '▾' : '▸'}
+        </span>
         <span className="mono" style={{ color: 'var(--accent-ink)', fontSize: 10.5 }}>
           {tc.tool || '…'}
         </span>
@@ -1352,7 +1396,13 @@ function HistoricalRunCard({
                 {nr.status} · {nr.duration_ms}ms
               </span>
             </summary>
-            <div style={{ padding: '8px 0' }}>
+            <div
+              style={{
+                padding: '8px 0 8px 14px',
+                marginLeft: 4,
+                borderLeft: '1px solid var(--rule-2)',
+              }}
+            >
               {nr.error && (
                 <>
                   <pre

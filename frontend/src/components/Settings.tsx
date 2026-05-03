@@ -44,8 +44,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           >
             keys & defaults.
           </h2>
-          <button onClick={onClose} className="btn-ghost">
-            close
+          <button className="ed-btn ed-btn--mini" onClick={onClose}>
+            close <span className="ed-btn__mark">×</span>
           </button>
         </div>
 

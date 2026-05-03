@@ -6,13 +6,13 @@ import remarkGfm from 'remark-gfm';
  * for code, terracotta for accents/links. Used wherever an LLM-produced text
  * value lands in the UI (mostly inside JsonView for run inputs/outputs).
  */
-export function Markdown({ children }: { children: string }) {
+export function Markdown({ children, large = false }: { children: string; large?: boolean }) {
   return (
     <div
       style={{
         fontFamily: 'var(--serif)',
-        fontSize: 13,
-        lineHeight: 1.55,
+        fontSize: large ? 15 : 13,
+        lineHeight: 1.6,
         color: 'var(--ink-2)',
       }}
     >
@@ -23,7 +23,7 @@ export function Markdown({ children }: { children: string }) {
           h1: ({ children }) => (
             <h1
               className="serif"
-              style={{ fontSize: 18, fontWeight: 500, margin: '6px 0 6px', color: 'var(--ink)' }}
+              style={{ fontSize: large ? 21 : 18, fontWeight: 500, margin: '6px 0 6px', color: 'var(--ink)' }}
             >
               {children}
             </h1>
@@ -31,7 +31,7 @@ export function Markdown({ children }: { children: string }) {
           h2: ({ children }) => (
             <h2
               className="serif"
-              style={{ fontSize: 16, fontWeight: 500, margin: '6px 0 6px', color: 'var(--ink)' }}
+              style={{ fontSize: large ? 18 : 16, fontWeight: 500, margin: '6px 0 6px', color: 'var(--ink)' }}
             >
               {children}
             </h2>
@@ -39,7 +39,7 @@ export function Markdown({ children }: { children: string }) {
           h3: ({ children }) => (
             <h3
               className="serif"
-              style={{ fontSize: 14, fontWeight: 500, margin: '4px 0 4px', color: 'var(--ink)' }}
+              style={{ fontSize: large ? 16 : 14, fontWeight: 500, margin: '4px 0 4px', color: 'var(--ink)' }}
             >
               {children}
             </h3>
@@ -131,7 +131,7 @@ export function Markdown({ children }: { children: string }) {
               );
             }
             return (
-              <code className={`mono ${className ?? ''}`} style={{ fontSize: 11.5 }}>
+              <code className={`mono ${className ?? ''}`} style={{ fontSize: large ? 13 : 11.5 }}>
                 {children}
               </code>
             );
@@ -146,7 +146,7 @@ export function Markdown({ children }: { children: string }) {
                 padding: 10,
                 overflow: 'auto',
                 margin: '0 0 8px',
-                fontSize: 11.5,
+                fontSize: large ? 13 : 11.5,
                 lineHeight: 1.55,
                 color: 'var(--ink-2)',
                 whiteSpace: 'pre',
@@ -160,7 +160,7 @@ export function Markdown({ children }: { children: string }) {
               <table
                 style={{
                   borderCollapse: 'collapse',
-                  fontSize: 12,
+                  fontSize: large ? 13.5 : 12,
                   fontFamily: 'var(--sans)',
                 }}
               >

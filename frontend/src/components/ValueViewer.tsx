@@ -75,16 +75,17 @@ function describe(value: unknown): PreviewInfo {
   return { text: String(value), size: null, inline: true };
 }
 
-function ValueBody({ value }: { value: unknown }) {
+function ValueBody({ value, large = false }: { value: unknown; large?: boolean }) {
   if (typeof value === 'string') {
     if (looksLikeMarkdown(value)) {
-      return <Markdown>{value}</Markdown>;
+      return <Markdown large={large}>{value}</Markdown>;
     }
     return (
       <pre
         className="mono"
         style={{
-          fontSize: 12,
+          fontSize: large ? 14 : 12,
+          lineHeight: large ? 1.55 : 1.5,
           color: 'var(--ink-2)',
           margin: 0,
           padding: '12px 16px',
@@ -99,7 +100,7 @@ function ValueBody({ value }: { value: unknown }) {
       </pre>
     );
   }
-  return <JsonView value={value} />;
+  return <JsonView value={value} large={large} />;
 }
 
 function copy(value: unknown) {
@@ -197,7 +198,7 @@ export function ViewerOverlay({ title, subtitle, value, onClose }: ViewerOverlay
           className="scroll"
           style={{ flex: 1, overflow: 'auto', padding: 18 }}
         >
-          <ValueBody value={value} />
+          <ValueBody value={value} large />
         </div>
         <div
           style={{

@@ -58,6 +58,57 @@ Then either:
   directly. (Topology — adding/removing nodes and edges, designating input/
   output — is owned by the orchestrator; you ask via chat.)
 
+## Run as a native Mac app
+
+Wrap the whole thing in a real `.app` bundle so it shows up in Spotlight,
+Launchpad, and the Dock — no terminals, no `localhost:5173` to remember.
+
+```bash
+make app-install     # one-time: adds pywebview to the backend venv
+make install-app     # build frontend + build .app + copy to /Applications
+```
+
+After `make install-app`, hit `Cmd+Space`, type `gorchestra`, press Enter.
+On the very first launch, right-click the app → **Open** to bypass the
+Gatekeeper "unidentified developer" warning (it's ad-hoc signed, not
+notarised). After that, normal double-click works.
+
+Other targets if you want finer control:
+
+```bash
+make app             # dev mode: launch in a window without bundling
+make app-bundle      # just build gorchestra.app in the project root
+```
+
+### How it works
+
+- `launcher.py` runs FastAPI in a daemon thread on port `8765` (pinned so
+  `localStorage` settings persist across launches — that store is keyed by
+  origin) and opens a native WKWebView window via `pywebview` with
+  `private_mode=False` so the data store survives restarts.
+- The frontend's static `dist/` is served from the same origin, so all
+  existing relative API/WebSocket URLs work unchanged.
+- `scripts/build_app.sh` produces the bundle. The executable in
+  `Contents/MacOS/` is a tiny C wrapper compiled to native arm64 — it just
+  `execv`s the project's venv Python on `launcher.py`. It has to be a real
+  Mach-O binary (not a shell script) or LaunchServices misreads the
+  architecture and falsely demands Rosetta. The bundle is then ad-hoc
+  signed so macOS 15+ App Management lets it launch.
+- Closing the window kills any in-flight workflow runs by signalling their
+  process group (the runner spawns its child with `start_new_session=True`).
+- Logs go to `$TMPDIR/gorchestra.log`.
+
+### Caveats
+
+- The bundle is hard-linked to this checkout — its launcher execs
+  `backend/.venv/bin/python` on this project's `launcher.py`. Move the
+  project directory and you'll need to `make install-app` again. For a
+  fully relocatable bundle, swap the C wrapper for `py2app`.
+- `localStorage` is keyed by the host process's bundle ID. Settings set via
+  `gorchestra.app` (bundle id `local.gorchestra`) won't appear when running
+  `make app` directly (Homebrew Python's `org.python.python`). Pick one
+  launch method and stick with it.
+
 ## Node code contract
 
 ```python

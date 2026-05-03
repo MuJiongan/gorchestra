@@ -78,6 +78,9 @@ def run_workflow_streaming(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            # New session = new process group, so a single killpg() reaps
+            # the child plus anything it spawned (shell tools, etc.).
+            start_new_session=True,
         )
     except Exception as e:
         ev_mod.append_event(

@@ -14,6 +14,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+app = [
+    "pywebview>=5.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

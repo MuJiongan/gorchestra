@@ -5,6 +5,8 @@ compat shim) read them. Subscribers get the existing backlog plus a live tail.
 """
 from __future__ import annotations
 import asyncio
+import os
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -64,7 +66,12 @@ def set_proc(run_id: str, proc: subprocess.Popen) -> None:
 
 
 def cancel(run_id: str) -> bool:
-    """Best-effort: SIGTERM the run's subprocess. Returns True if a signal was sent."""
+    """Best-effort: SIGTERM the run's process group. Returns True if a signal was sent.
+
+    The runner spawns the child with `start_new_session=True`, so signalling
+    the whole process group also reaps any grandchildren the child spawned
+    (e.g. `shell` tool subprocesses).
+    """
     st = _RUNS.get(run_id)
     if not st or st.finished:
         return False
@@ -74,7 +81,10 @@ def cancel(run_id: str) -> bool:
     with st.lock:
         st.cancelled = True
     try:
-        proc.terminate()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
         return True
     except Exception:
         return False

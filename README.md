@@ -94,8 +94,14 @@ make app-bundle      # just build gorchestra.app in the project root
   Mach-O binary (not a shell script) or LaunchServices misreads the
   architecture and falsely demands Rosetta. The bundle is then ad-hoc
   signed so macOS 15+ App Management lets it launch.
-- Closing the window kills any in-flight workflow runs by signalling their
-  process group (the runner spawns its child with `start_new_session=True`).
+- Closing the window — or force-quitting the app entirely — kills any
+  in-flight workflow runs by signalling their process group (the runner
+  spawns its child with `start_new_session=True`). For graceful close
+  (Cmd+Q, red button) the launcher's `closing` hook does it directly. For
+  abrupt death (SIGKILL, force-quit) the runner child has its own
+  parent-death watchdog: it holds the read end of a pipe whose write end
+  the parent keeps open, gets EOF the instant parent dies, and tears down
+  its own process group. So no orphaned `shell` tool subprocesses either way.
 - Logs go to `$TMPDIR/gorchestra.log`.
 
 ### Caveats
@@ -104,10 +110,11 @@ make app-bundle      # just build gorchestra.app in the project root
   `backend/.venv/bin/python` on this project's `launcher.py`. Move the
   project directory and you'll need to `make install-app` again. For a
   fully relocatable bundle, swap the C wrapper for `py2app`.
-- `localStorage` is keyed by the host process's bundle ID. Settings set via
-  `gorchestra.app` (bundle id `local.gorchestra`) won't appear when running
-  `make app` directly (Homebrew Python's `org.python.python`). Pick one
-  launch method and stick with it.
+- `make dev` runs the frontend in your browser (Chrome/Safari) and uses
+  that browser's `localStorage`. The native-window launches (`make app`
+  and `gorchestra.app`) both run via Homebrew's embedded Python.app and
+  share a WKWebView store under `~/Library/WebKit/org.python.python/`,
+  so settings carry between those two — but not from the browser.
 
 ## Node code contract
 

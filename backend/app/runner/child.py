@@ -64,8 +64,45 @@ def _install_sigterm_handler() -> None:
         pass
 
 
+def _install_parent_death_watchdog() -> None:
+    """Self-terminate if the parent runner dies abruptly (e.g. SIGKILL).
+
+    The parent passes the read end of a pipe via PARENT_DEATH_FD. As long as
+    parent is alive, it holds the write end open. If parent is killed by any
+    means (force-quit, OOM kill, segfault), the kernel closes the write end
+    and our blocking read returns EOF immediately. We then SIGTERM our own
+    process group to take down any grandchildren (shell tools, etc.) and
+    exit. Without this, force-quitting the app would orphan in-flight runs.
+    """
+    fd_str = os.environ.get("PARENT_DEATH_FD")
+    if not fd_str:
+        return
+    try:
+        fd = int(fd_str)
+    except ValueError:
+        return
+
+    def _watch() -> None:
+        try:
+            os.read(fd, 1)
+        except (OSError, ValueError):
+            pass
+        # Defensive: if ppid != 1, the FD closed for some other reason and
+        # parent is still alive — leave it alone.
+        if os.getppid() != 1:
+            return
+        try:
+            os.killpg(os.getpgid(0), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        os._exit(1)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def main() -> None:
     _install_sigterm_handler()
+    _install_parent_death_watchdog()
     raw = sys.stdin.read()
     payload = json.loads(raw)
 

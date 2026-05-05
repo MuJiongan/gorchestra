@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session as DbSession
 
 from app import models, schemas
+from app.runner import tools as _runtime_tools
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +302,34 @@ def view_node_details(db: DbSession, wid: str, *, node_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# graph-building research tools — same callables the node runtime uses,
+# rebound here so the orchestrator can reach for them *before* mutating the
+# graph (e.g. probe a repo with `shell`, look up an API with `web_search`,
+# read a doc with `web_fetch`). The prompt restricts when they're called;
+# the dispatcher just delegates.
+# ---------------------------------------------------------------------------
+
+
+def shell(db: DbSession, wid: str, *, command: str, timeout: int = 30) -> dict:
+    return _runtime_tools.shell(command=command, timeout=timeout)
+
+
+def web_search(db: DbSession, wid: str, *, query: str, max_results: int = 10) -> dict:
+    return _runtime_tools.web_search(query=query, max_results=max_results)
+
+
+def web_fetch(
+    db: DbSession,
+    wid: str,
+    *,
+    urls: list[str],
+    objective: str,
+    full_content: bool,
+) -> dict:
+    return _runtime_tools.web_fetch(urls=urls, objective=objective, full_content=full_content)
+
+
+# ---------------------------------------------------------------------------
 # registry + LLM tool schemas
 # ---------------------------------------------------------------------------
 
@@ -316,12 +345,23 @@ REGISTRY = {
     "remove_edge": remove_edge,
     "set_input_node": set_input_node,
     "set_output_node": set_output_node,
+    "shell": shell,
+    "web_search": web_search,
+    "web_fetch": web_fetch,
 }
 
 
-# Tools that don't mutate the graph — exempt from the run-in-progress lock so
-# the orchestrator can still inspect the graph while a workflow is executing.
-READ_ONLY_TOOLS: set[str] = {"view_graph", "view_node_details"}
+# Tools that don't mutate the workflow graph — exempt from the
+# run-in-progress lock. Includes the read-only inspection tools and the
+# research tools (`shell`, `web_search`, `web_fetch`); none of them touch
+# graph state, so they're safe to call while a workflow is executing.
+NON_GRAPH_MUTATING_TOOLS: set[str] = {
+    "view_graph",
+    "view_node_details",
+    "shell",
+    "web_search",
+    "web_fetch",
+}
 
 
 _PORT_SCHEMA = {
@@ -499,6 +539,11 @@ TOOL_SCHEMAS: dict[str, dict] = {
             },
         },
     },
+    # Research tools — `shell`, `web_search`, `web_fetch` — share their schemas
+    # with the node runtime (single source of truth in `app.runner.tools`).
+    # The "graph-building research only" guardrail lives in the system prompt,
+    # not in the per-tool description, since it's a cross-tool policy.
+    **{name: _runtime_tools.TOOL_SCHEMAS[name] for name in ("shell", "web_search", "web_fetch")},
 }
 
 
@@ -544,7 +589,7 @@ def execute(db: DbSession, wid: str, name: str, args: dict) -> dict:
     # the current run anyway, and they can leave the orchestrator's mental
     # model out of sync with the run that the user is watching. Read-only
     # inspection tools are always allowed.
-    if name not in READ_ONLY_TOOLS:
+    if name not in NON_GRAPH_MUTATING_TOOLS:
         active = _active_run_id(db, wid)
         if active is not None:
             return {

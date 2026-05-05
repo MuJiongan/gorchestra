@@ -251,7 +251,21 @@ def test_llm_tool_specs_covers_full_surface():
         "remove_edge",
         "set_input_node",
         "set_output_node",
+        "shell",
+        "web_search",
+        "web_fetch",
     }
+
+
+def test_research_tool_schemas_are_shared_with_runner():
+    """`shell`, `web_search`, `web_fetch` are the same surface for orchestrator
+    and node runtime — the schemas must come from one source of truth so a
+    runner-side change flows through automatically."""
+    from app.runner import tools as runtime_tools
+
+    orch_specs = {spec["function"]["name"]: spec for spec in orch_tools.llm_tool_specs()}
+    for name in ("shell", "web_search", "web_fetch"):
+        assert orch_specs[name] is runtime_tools.TOOL_SCHEMAS[name]
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +365,7 @@ def test_view_node_details_unknown_node_errors(db, workflow):
 
 
 def test_view_tools_work_during_active_run(db, workflow):
-    """Read-only tools must NOT be blocked by the run-in-progress lock."""
+    """Non-graph-mutating tools must NOT be blocked by the run-in-progress lock."""
     from app.runner import events as ev_mod
 
     nid = orch_tools.add_node(db, workflow.id, name="a")["node_id"]
@@ -377,11 +391,23 @@ def test_view_tools_work_during_active_run(db, workflow):
     assert "error" not in d
     assert d["id"] == nid
 
+    # Research tools: also not blocked (they don't touch the graph).
+    sh = orch_tools.execute(db, workflow.id, "shell", {"command": "echo hi"})
+    assert "error" not in sh
+    assert sh["stdout"].strip() == "hi"
 
-def test_read_only_tools_set_matches_registry():
-    # Belt-and-braces: the named-set has to match what's actually safe to call.
-    assert orch_tools.READ_ONLY_TOOLS == {"view_graph", "view_node_details"}
-    for name in orch_tools.READ_ONLY_TOOLS:
+
+def test_non_graph_mutating_tools_set_matches_registry():
+    # Belt-and-braces: the named-set has to match what's actually safe to call
+    # while a workflow run is in flight.
+    assert orch_tools.NON_GRAPH_MUTATING_TOOLS == {
+        "view_graph",
+        "view_node_details",
+        "shell",
+        "web_search",
+        "web_fetch",
+    }
+    for name in orch_tools.NON_GRAPH_MUTATING_TOOLS:
         assert name in orch_tools.REGISTRY
 
 

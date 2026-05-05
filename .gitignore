@@ -16,3 +16,4 @@ build/
 .vite/
 *.tsbuildinfo
 .claude/settings.local.json
+*.app/

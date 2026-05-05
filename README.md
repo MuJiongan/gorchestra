@@ -58,6 +58,64 @@ Then either:
   directly. (Topology — adding/removing nodes and edges, designating input/
   output — is owned by the orchestrator; you ask via chat.)
 
+## Run as a native Mac app
+
+Wrap the whole thing in a real `.app` bundle so it shows up in Spotlight,
+Launchpad, and the Dock — no terminals, no `localhost:5173` to remember.
+
+```bash
+make app-install     # one-time: adds pywebview to the backend venv
+make install-app     # build frontend + build .app + copy to /Applications
+```
+
+After `make install-app`, hit `Cmd+Space`, type `gorchestra`, press Enter.
+On the very first launch, right-click the app → **Open** to bypass the
+Gatekeeper "unidentified developer" warning (it's ad-hoc signed, not
+notarised). After that, normal double-click works.
+
+Other targets if you want finer control:
+
+```bash
+make app             # dev mode: launch in a window without bundling
+make app-bundle      # just build gorchestra.app in the project root
+```
+
+### How it works
+
+- `launcher.py` runs FastAPI in a daemon thread on port `8765` (pinned so
+  `localStorage` settings persist across launches — that store is keyed by
+  origin) and opens a native WKWebView window via `pywebview` with
+  `private_mode=False` so the data store survives restarts.
+- The frontend's static `dist/` is served from the same origin, so all
+  existing relative API/WebSocket URLs work unchanged.
+- `scripts/build_app.sh` produces the bundle. The executable in
+  `Contents/MacOS/` is a tiny C wrapper compiled to native arm64 — it just
+  `execv`s the project's venv Python on `launcher.py`. It has to be a real
+  Mach-O binary (not a shell script) or LaunchServices misreads the
+  architecture and falsely demands Rosetta. The bundle is then ad-hoc
+  signed so macOS 15+ App Management lets it launch.
+- Closing the window — or force-quitting the app entirely — kills any
+  in-flight workflow runs by signalling their process group (the runner
+  spawns its child with `start_new_session=True`). For graceful close
+  (Cmd+Q, red button) the launcher's `closing` hook does it directly. For
+  abrupt death (SIGKILL, force-quit) the runner child has its own
+  parent-death watchdog: it holds the read end of a pipe whose write end
+  the parent keeps open, gets EOF the instant parent dies, and tears down
+  its own process group. So no orphaned `shell` tool subprocesses either way.
+- Logs go to `$TMPDIR/gorchestra.log`.
+
+### Caveats
+
+- The bundle is hard-linked to this checkout — its launcher execs
+  `backend/.venv/bin/python` on this project's `launcher.py`. Move the
+  project directory and you'll need to `make install-app` again. For a
+  fully relocatable bundle, swap the C wrapper for `py2app`.
+- `make dev` runs the frontend in your browser (Chrome/Safari) and uses
+  that browser's `localStorage`. The native-window launches (`make app`
+  and `gorchestra.app`) both run via Homebrew's embedded Python.app and
+  share a WKWebView store under `~/Library/WebKit/org.python.python/`,
+  so settings carry between those two — but not from the browser.
+
 ## Node code contract
 
 ```python

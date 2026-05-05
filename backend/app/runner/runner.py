@@ -71,6 +71,14 @@ def run_workflow_streaming(
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
+    # Parent-death pipe: child blocks reading from death_r; if parent dies for
+    # any reason (SIGKILL, force-quit, segfault), the kernel closes death_w
+    # and the child's read returns EOF immediately, triggering self-teardown
+    # of the child + its process group. Covers the case the SIGTERM-based
+    # cancel and atexit hooks can't (since neither runs on SIGKILL).
+    death_r, death_w = os.pipe()
+    env["PARENT_DEATH_FD"] = str(death_r)
+
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "app.runner.child"],
@@ -78,8 +86,18 @@ def run_workflow_streaming(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            # New session = new process group, so a single killpg() reaps
+            # the child plus anything it spawned (shell tools, etc.).
+            start_new_session=True,
+            # Inherit the read end of the death pipe with the same fd number.
+            pass_fds=(death_r,),
         )
     except Exception as e:
+        for fd in (death_r, death_w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         ev_mod.append_event(
             run_id,
             {
@@ -92,76 +110,87 @@ def run_workflow_streaming(
         )
         return
 
+    # Parent doesn't need the read end; only the child does.
+    os.close(death_r)
     ev_mod.set_proc(run_id, proc)
 
     try:
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps(payload).encode())
-        proc.stdin.close()
-    except Exception as e:
-        ev_mod.append_event(
-            run_id,
-            {
-                "type": "run_finished",
-                "status": "error",
-                "error": f"failed to write to runner stdin: {e}",
-                "outputs": {},
-                "total_cost": 0.0,
-            },
-        )
         try:
-            proc.kill()
-        except Exception:
-            pass
-        return
-
-    saw_finished = False
-    assert proc.stdout is not None
-    for raw in proc.stdout:
-        line = raw.decode(errors="replace").strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except Exception:
-            continue
-        ev_mod.append_event(run_id, event)
-        if event.get("type") == "run_finished":
-            saw_finished = True
-
-    rc = proc.wait()
-
-    if not saw_finished:
-        stderr_text = ""
-        try:
-            if proc.stderr is not None:
-                stderr_text = proc.stderr.read().decode(errors="replace")
-        except Exception:
-            pass
-        st = ev_mod.get(run_id)
-        cancelled = bool(st and st.cancelled)
-        if cancelled or rc < 0:
-            ev_mod.append_event(
-                run_id,
-                {
-                    "type": "run_finished",
-                    "status": "cancelled",
-                    "error": "cancelled by user" if cancelled else f"runner killed (rc={rc})",
-                    "outputs": {},
-                    "total_cost": 0.0,
-                },
-            )
-        else:
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(payload).encode())
+            proc.stdin.close()
+        except Exception as e:
             ev_mod.append_event(
                 run_id,
                 {
                     "type": "run_finished",
                     "status": "error",
-                    "error": f"runner exited rc={rc}: {stderr_text[-1000:]}",
+                    "error": f"failed to write to runner stdin: {e}",
                     "outputs": {},
                     "total_cost": 0.0,
                 },
             )
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return
+
+        saw_finished = False
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            ev_mod.append_event(run_id, event)
+            if event.get("type") == "run_finished":
+                saw_finished = True
+
+        rc = proc.wait()
+
+        if not saw_finished:
+            stderr_text = ""
+            try:
+                if proc.stderr is not None:
+                    stderr_text = proc.stderr.read().decode(errors="replace")
+            except Exception:
+                pass
+            st = ev_mod.get(run_id)
+            cancelled = bool(st and st.cancelled)
+            if cancelled or rc < 0:
+                ev_mod.append_event(
+                    run_id,
+                    {
+                        "type": "run_finished",
+                        "status": "cancelled",
+                        "error": "cancelled by user" if cancelled else f"runner killed (rc={rc})",
+                        "outputs": {},
+                        "total_cost": 0.0,
+                    },
+                )
+            else:
+                ev_mod.append_event(
+                    run_id,
+                    {
+                        "type": "run_finished",
+                        "status": "error",
+                        "error": f"runner exited rc={rc}: {stderr_text[-1000:]}",
+                        "outputs": {},
+                        "total_cost": 0.0,
+                    },
+                )
+    finally:
+        # Child has exited (proc.wait completed). Close the write end so the
+        # FD doesn't leak. The watchdog in the (already-dead) child can't
+        # observe this, but on parent SIGKILL the kernel does this for us.
+        try:
+            os.close(death_w)
+        except OSError:
+            pass
 
 
 def run_workflow_sync(

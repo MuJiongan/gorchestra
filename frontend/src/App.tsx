@@ -750,6 +750,13 @@ export default function App() {
                         onChange={() => {}}
                         readOnly
                         pinnedRun={viewingRun}
+                        // Pass currentRun so the trace tab streams live
+                        // events when this snapshot view is bound to an
+                        // in-flight run (rerun-from-snapshot, or recent-run
+                        // click on a running run). Without it, the trace
+                        // would fall back to viewingRun.node_runs — empty
+                        // for runs that haven't materialised yet.
+                        currentRun={currentRun}
                         onSendErrorToOrchestrator={sendErrorToOrchestrator}
                       />
                     );

@@ -93,17 +93,14 @@ export function RunPanel({
     api.listRuns(workflow.id).then(setHistory).catch(() => {});
   }, [workflow.id]);
 
-  // Refresh history when a run finishes so the latest one shows up.
+  // Refresh history whenever the attached run changes (a new one was
+  // started/clicked) or its status changes. Covers both the "the run just
+  // started, show it in the list" case and the "the run finished, flip its
+  // status" case in one effect.
   useEffect(() => {
-    if (
-      ownRun &&
-      (ownRun.status === 'success' ||
-        ownRun.status === 'error' ||
-        ownRun.status === 'cancelled')
-    ) {
-      api.listRuns(workflow.id).then(setHistory).catch(() => {});
-    }
-  }, [ownRun?.status, workflow.id]);
+    if (!ownRun) return;
+    api.listRuns(workflow.id).then(setHistory).catch(() => {});
+  }, [ownRun?.id, ownRun?.status, workflow.id]);
 
   // While any row in `history` still reads as running/pending, poll so its
   // status flips once the backend marks it terminal. Covers the case where

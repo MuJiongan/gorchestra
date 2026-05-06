@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Components } from 'react-markdown';
+import { api } from '../api';
+import type { Run } from '../types';
 
 export type ChatToolStatus = 'pending' | 'ok' | 'err';
 
@@ -194,6 +196,10 @@ export interface ChatToolCall {
   tool: string;
   args: string;
   status: ChatToolStatus;
+  /** Tool result payload — `run_workflow` and a few others stash structured
+   * data here so the panel can render rich cards. Untyped on purpose; each
+   * card pulls the keys it cares about. */
+  result?: unknown;
 }
 
 export interface ChatParagraph {
@@ -229,6 +235,10 @@ interface Props {
   sessionTitle?: string;
   modelLabel?: string;
   onClose?: () => void;
+  /** Called when the user clicks "view this run on the canvas" in a
+   * `run_workflow` tool card. The host can swap the canvas to render the
+   * run's frozen `workflow_snapshot`. */
+  onViewRun?: (runId: string) => void;
 }
 
 function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
@@ -347,7 +357,317 @@ function ToolCallCard({ tool, args, status }: ChatToolCall) {
   );
 }
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+// ---------------------------------------------------------------------------
+// run_workflow card — a richer tool card that surfaces the frozen graph
+// snapshot the run actually executed: node count, status of each, total
+// cost, and the failing node(s) when something errored. Pulls the snapshot
+// via GET /api/runs/:rid; falls back to the live `result` payload if the
+// fetch fails (offline, run vanished, etc.).
+// ---------------------------------------------------------------------------
+
+interface RunWorkflowResult {
+  run_id?: string;
+  status?: string;
+  outputs?: Record<string, unknown>;
+  node_errors?: { node_id: string; node_name: string; error: string }[];
+  error?: string | null;
+  total_cost?: number;
+}
+
+function preview(value: unknown, max = 140): string {
+  if (value == null) return '∅';
+  if (typeof value === 'string') {
+    return value.length > max ? value.slice(0, max - 1) + '…' : value;
+  }
+  try {
+    const json = JSON.stringify(value);
+    return json.length > max ? json.slice(0, max - 1) + '…' : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function RunWorkflowCard({
+  args,
+  status,
+  result,
+  onViewRun,
+}: ChatToolCall & { onViewRun?: (runId: string) => void }) {
+  const r = (result ?? {}) as RunWorkflowResult;
+  const runId = r.run_id;
+  const [snapshot, setSnapshot] = useState<Run | null>(null);
+
+  useEffect(() => {
+    if (!runId || status === 'pending') return;
+    let cancelled = false;
+    api
+      .getRun(runId)
+      .then((run) => {
+        if (!cancelled) setSnapshot(run);
+      })
+      .catch(() => {
+        // Snapshot fetch failures are non-fatal — the card still renders the
+        // live `result` payload, just without per-node detail.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, status]);
+
+  const wfSnap = snapshot?.workflow_snapshot ?? null;
+  const nodeRuns = snapshot?.node_runs ?? [];
+  const nodeNamesById = new Map(wfSnap?.nodes.map((n) => [n.id, n.name]) ?? []);
+  const inputName = wfSnap?.input_node_id ? nodeNamesById.get(wfSnap.input_node_id) : undefined;
+  const outputName = wfSnap?.output_node_id ? nodeNamesById.get(wfSnap.output_node_id) : undefined;
+
+  const isPending = status === 'pending';
+  const isErr = status === 'err' || !!r.error || (r.node_errors?.length ?? 0) > 0;
+  const statusColor = isPending
+    ? 'var(--ink-4)'
+    : isErr
+      ? 'var(--state-err)'
+      : 'var(--state-ok)';
+  const statusLabel = isPending ? 'running' : isErr ? 'failed' : 'ran';
+  const cost = r.total_cost ?? 0;
+
+  return (
+    <div
+      className="tool-call fade-in"
+      style={{
+        padding: '10px 12px',
+        margin: '8px 0',
+        fontSize: 11.5,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      {/* header row: tool name · status pill · cost */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <span className="mono" style={{ color: 'var(--accent-ink)', fontSize: 10.5 }}>
+          run_workflow
+        </span>
+        <span
+          className="smallcaps"
+          style={{ color: statusColor, fontSize: 9 }}
+        >
+          {isPending ? '… running' : isErr ? '× failed' : '✓ ran'}
+        </span>
+        <span style={{ flex: 1 }} />
+        {cost > 0 && (
+          <span
+            className="mono"
+            style={{ color: 'var(--ink-4)', fontSize: 10 }}
+            title="total cost"
+          >
+            ${cost.toFixed(4)}
+          </span>
+        )}
+      </div>
+
+      {/* snapshot summary line */}
+      {wfSnap && (
+        <div
+          className="serif"
+          style={{ color: 'var(--ink-3)', fontSize: 12, fontStyle: 'italic' }}
+        >
+          {statusLabel}{' '}
+          <span className="mono" style={{ fontSize: 11, fontStyle: 'normal' }}>
+            {wfSnap.nodes.length}-node
+          </span>{' '}
+          workflow
+          {inputName && (
+            <>
+              {' · '}
+              <span className="mono" style={{ fontSize: 11, fontStyle: 'normal' }}>
+                {inputName}
+              </span>
+              {' → '}
+              <span className="mono" style={{ fontSize: 11, fontStyle: 'normal' }}>
+                {outputName ?? '?'}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* args (the inputs the orchestrator passed) — small + muted */}
+      {args && (
+        <div
+          className="mono"
+          style={{
+            color: 'var(--ink-4)',
+            fontSize: 10.5,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {args}
+        </div>
+      )}
+
+      {/* per-node statuses (compact list) */}
+      {wfSnap && nodeRuns.length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'auto 1fr auto',
+            columnGap: 8,
+            rowGap: 3,
+            fontSize: 10.5,
+          }}
+        >
+          {wfSnap.nodes.map((n) => {
+            const nr = nodeRuns.find((x) => x.node_id === n.id);
+            const st = nr?.status ?? 'pending';
+            const dot =
+              st === 'success'
+                ? 'var(--state-ok)'
+                : st === 'error'
+                  ? 'var(--state-err)'
+                  : st === 'skipped'
+                    ? 'var(--ink-5)'
+                    : 'var(--ink-4)';
+            return (
+              <>
+                <span
+                  key={`${n.id}-dot`}
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: dot,
+                    alignSelf: 'center',
+                  }}
+                />
+                <span
+                  key={`${n.id}-name`}
+                  className="mono"
+                  style={{ color: 'var(--ink-3)', fontSize: 10.5 }}
+                >
+                  {n.name}
+                </span>
+                <span
+                  key={`${n.id}-status`}
+                  className="smallcaps"
+                  style={{ color: 'var(--ink-4)', fontSize: 9 }}
+                >
+                  {st}
+                </span>
+              </>
+            );
+          })}
+        </div>
+      )}
+
+      {/* errors — front and center when something failed */}
+      {(r.node_errors ?? []).map((e) => (
+        <div
+          key={e.node_id}
+          style={{
+            background: 'rgba(180, 60, 60, 0.06)',
+            borderLeft: '2px solid var(--state-err)',
+            padding: '5px 8px',
+            fontSize: 11,
+            color: 'var(--ink-2)',
+          }}
+        >
+          <span className="mono" style={{ color: 'var(--state-err)' }}>
+            {e.node_name}
+          </span>
+          <span style={{ color: 'var(--ink-4)' }}>{' — '}</span>
+          <span style={{ fontFamily: 'var(--serif)', fontStyle: 'italic' }}>
+            {e.error}
+          </span>
+        </div>
+      ))}
+      {r.error && !(r.node_errors ?? []).length && (
+        <div
+          style={{
+            background: 'rgba(180, 60, 60, 0.06)',
+            borderLeft: '2px solid var(--state-err)',
+            padding: '5px 8px',
+            fontSize: 11,
+            color: 'var(--ink-2)',
+            fontStyle: 'italic',
+            fontFamily: 'var(--serif)',
+          }}
+        >
+          {r.error}
+        </div>
+      )}
+
+      {/* outputs — compact preview */}
+      {!isErr && r.outputs && Object.keys(r.outputs).length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'auto 1fr',
+            columnGap: 8,
+            rowGap: 2,
+            fontSize: 11,
+            color: 'var(--ink-3)',
+          }}
+        >
+          {Object.entries(r.outputs).map(([k, v]) => (
+            <>
+              <span key={`${k}-k`} className="mono" style={{ color: 'var(--ink-4)', fontSize: 10.5 }}>
+                {k}
+              </span>
+              <span
+                key={`${k}-v`}
+                className="serif"
+                style={{
+                  color: 'var(--ink-2)',
+                  fontStyle: 'italic',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {preview(v)}
+              </span>
+            </>
+          ))}
+        </div>
+      )}
+
+      {/* footer: view-on-canvas action */}
+      {runId && onViewRun && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={() => onViewRun(runId)}
+            className="smallcaps"
+            style={{
+              background: 'transparent',
+              border: 0,
+              padding: '2px 0',
+              cursor: 'pointer',
+              color: 'var(--accent-ink)',
+              fontSize: 9.5,
+              fontFamily: 'var(--serif)',
+              fontStyle: 'italic',
+              textTransform: 'none',
+              letterSpacing: 0,
+            }}
+          >
+            view this run's graph →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({
+  msg,
+  onViewRun,
+}: {
+  msg: ChatMessage;
+  onViewRun?: (runId: string) => void;
+}) {
   if (msg.role === 'user') {
     return (
       <div
@@ -418,6 +738,9 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
               </ReactMarkdown>
             );
           }
+          if (c.tool === 'run_workflow') {
+            return <RunWorkflowCard key={i} {...c} onViewRun={onViewRun} />;
+          }
           return <ToolCallCard key={i} {...c} />;
         })}
         {msg.streaming && <span className="caret" />}
@@ -426,7 +749,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
-export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, modelLabel, onClose }: Props) {
+export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, modelLabel, onClose, onViewRun }: Props) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -529,7 +852,7 @@ export function ChatPanel({ messages, onSend, onCancel, disabled, sessionTitle, 
           </div>
         )}
         {messages.map((m, i) => (
-          <MessageBubble key={i} msg={m} />
+          <MessageBubble key={i} msg={m} onViewRun={onViewRun} />
         ))}
       </div>
 

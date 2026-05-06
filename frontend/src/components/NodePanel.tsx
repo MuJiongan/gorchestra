@@ -18,6 +18,13 @@ interface Props {
   workflow: WorkflowDetail;
   onClose: () => void;
   onChange: () => void;
+  /** Render as read-only — used when inspecting a snapshot. Hides the save
+   * button, locks the editor, and short-circuits the "last run" tab to a
+   * single pinned run instead of fetching the workflow's run history. */
+  readOnly?: boolean;
+  /** When set, the "last run" tab uses this run only — no listRuns call.
+   * Snapshot view passes the run that produced the snapshot. */
+  pinnedRun?: Run;
 }
 
 type Tab = 'code' | 'i/o' | 'last run';
@@ -46,7 +53,7 @@ const PANEL_STYLE: React.CSSProperties = {
  * Saves set `mark_user_edited` so the orchestrator's next pass can preserve
  * user intent (per PRD §4.4).
  */
-export function NodePanel({ node, workflow, onClose, onChange }: Props) {
+export function NodePanel({ node, workflow, onClose, onChange, readOnly, pinnedRun }: Props) {
   const [tab, setTab] = useState<Tab>('code');
   const [code, setCode] = useState(node.code);
   const [dirty, setDirty] = useState(false);
@@ -76,7 +83,7 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="smallcaps">node</span>
           <span style={{ flex: 1 }} />
-          {dirty && (
+          {dirty && !readOnly && (
             <button className="btn-ink" style={{ padding: '5px 12px', fontSize: 11 }} onClick={save}>
               save
             </button>
@@ -157,13 +164,18 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
               theme="vs-dark"
               language="python"
               value={code}
-              onChange={(v) => { setCode(v ?? ''); setDirty(true); }}
+              onChange={(v) => {
+                if (readOnly) return;
+                setCode(v ?? '');
+                setDirty(true);
+              }}
               options={{
                 minimap: { enabled: false },
                 fontSize: 12,
                 fontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace",
                 scrollBeyondLastLine: false,
                 lineNumbers: 'off',
+                readOnly: !!readOnly,
               }}
             />
           </div>
@@ -212,7 +224,9 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
           </div>
         )}
 
-        {tab === 'last run' && <LastRunsTab nodeId={node.id} workflow={workflow} />}
+        {tab === 'last run' && (
+          <LastRunsTab nodeId={node.id} workflow={workflow} pinnedRun={pinnedRun} />
+        )}
       </div>
     </div>
   );
@@ -283,9 +297,17 @@ interface NodeRunEntry {
   nodeRun: NodeRun;
 }
 
-function LastRunsTab({ nodeId, workflow }: { nodeId: string; workflow: WorkflowDetail }) {
+function LastRunsTab({
+  nodeId,
+  workflow,
+  pinnedRun,
+}: {
+  nodeId: string;
+  workflow: WorkflowDetail;
+  pinnedRun?: Run;
+}) {
   const workflowId = workflow.id;
-  const [runs, setRuns] = useState<Run[] | null>(null);
+  const [runs, setRuns] = useState<Run[] | null>(pinnedRun ? [pinnedRun] : null);
   const [error, setError] = useState<string | null>(null);
   const [openRunId, setOpenRunId] = useState<string | null>(null);
   // Tracks whether we've already auto-opened the most-recent run for this
@@ -295,6 +317,12 @@ function LastRunsTab({ nodeId, workflow }: { nodeId: string; workflow: WorkflowD
   const [autoOpened, setAutoOpened] = useState(false);
 
   const refresh = async () => {
+    // Snapshot view: the tab is bound to a single run, no fetch needed.
+    if (pinnedRun) {
+      setRuns([pinnedRun]);
+      setError(null);
+      return;
+    }
     try {
       const list = await api.listRuns(workflowId);
       setRuns(list);
@@ -305,12 +333,17 @@ function LastRunsTab({ nodeId, workflow }: { nodeId: string; workflow: WorkflowD
   };
 
   useEffect(() => {
-    setRuns(null);
     setOpenRunId(null);
     setAutoOpened(false);
+    if (pinnedRun) {
+      setRuns([pinnedRun]);
+      setError(null);
+      return;
+    }
+    setRuns(null);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeId, workflowId]);
+  }, [nodeId, workflowId, pinnedRun?.id]);
 
   // Filter to runs that actually touched this node, most recent first (the
   // listRuns endpoint already orders by started_at desc).

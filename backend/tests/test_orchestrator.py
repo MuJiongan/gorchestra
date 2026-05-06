@@ -251,21 +251,58 @@ def test_llm_tool_specs_covers_full_surface():
         "remove_edge",
         "set_input_node",
         "set_output_node",
-        "shell",
-        "web_search",
-        "web_fetch",
+        "clean_canvas",
+        "run_workflow",
+        "view_run",
     }
 
 
-def test_research_tool_schemas_are_shared_with_runner():
-    """`shell`, `web_search`, `web_fetch` are the same surface for orchestrator
-    and node runtime — the schemas must come from one source of truth so a
-    runner-side change flows through automatically."""
-    from app.runner import tools as runtime_tools
+def test_clean_canvas_wipes_nodes_edges_and_pointers(db, workflow):
+    """`clean_canvas` removes every node + edge and clears in/out pointers,
+    but leaves the workflow row + sessions + runs intact."""
+    a = orch_tools.add_node(
+        db, workflow.id, name="a", outputs=[{"name": "x"}],
+    )["node_id"]
+    b = orch_tools.add_node(
+        db, workflow.id, name="b", inputs=[{"name": "y", "required": True}],
+    )["node_id"]
+    orch_tools.add_edge(
+        db, workflow.id,
+        from_node_id=a, from_output="x", to_node_id=b, to_input="y",
+    )
+    orch_tools.set_input_node(db, workflow.id, node_id=a)
+    orch_tools.set_output_node(db, workflow.id, node_id=b)
+    # A historical run row — must survive the wipe.
+    run = models.Run(workflow_id=workflow.id, kind="user", status="success", inputs={})
+    db.add(run)
+    db.commit()
+    rid = run.id
 
-    orch_specs = {spec["function"]["name"]: spec for spec in orch_tools.llm_tool_specs()}
-    for name in ("shell", "web_search", "web_fetch"):
-        assert orch_specs[name] is runtime_tools.TOOL_SCHEMAS[name]
+    res = orch_tools.clean_canvas(db, workflow.id)
+    assert res == {"cleared": True, "removed_nodes": 2, "removed_edges": 1}
+
+    db.refresh(workflow)
+    assert workflow.input_node_id is None
+    assert workflow.output_node_id is None
+    assert db.query(models.Node).filter_by(workflow_id=workflow.id).count() == 0
+    assert db.query(models.Edge).filter_by(workflow_id=workflow.id).count() == 0
+    # Run history preserved.
+    assert db.get(models.Run, rid) is not None
+
+
+def test_clean_canvas_blocked_during_active_run(db, workflow):
+    """Clean is a graph mutation — must respect the run-in-progress lock."""
+    from app.runner import events as ev_mod
+
+    orch_tools.add_node(db, workflow.id, name="a")["node_id"]
+    run = models.Run(workflow_id=workflow.id, kind="user", status="running", inputs={})
+    db.add(run); db.commit(); db.refresh(run)
+    ev_mod.get_or_create(run.id)
+
+    res = orch_tools.execute(db, workflow.id, "clean_canvas", {})
+    assert "error" in res
+    assert "in progress" in res["error"]
+    assert db.query(models.Node).filter_by(workflow_id=workflow.id).count() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -391,21 +428,130 @@ def test_view_tools_work_during_active_run(db, workflow):
     assert "error" not in d
     assert d["id"] == nid
 
-    # Research tools: also not blocked (they don't touch the graph).
-    sh = orch_tools.execute(db, workflow.id, "shell", {"command": "echo hi"})
-    assert "error" not in sh
-    assert sh["stdout"].strip() == "hi"
+
+def test_run_snapshot_survives_subsequent_graph_mutation(db, workflow):
+    """A `Run` row's `workflow_snapshot` is frozen at creation — removing
+    nodes/edges afterwards must not perturb it. This is the contract that
+    lets the canvas re-render an old run's graph after the live workflow
+    has been edited."""
+    from app.api.runs import _serialize_workflow
+
+    a = orch_tools.add_node(
+        db, workflow.id, name="loader",
+        code="def run(inputs, ctx):\n    return {'x': 1}\n",
+        outputs=[{"name": "x"}],
+    )["node_id"]
+    b = orch_tools.add_node(
+        db, workflow.id, name="summariser",
+        inputs=[{"name": "y", "required": True}],
+    )["node_id"]
+    orch_tools.add_edge(
+        db, workflow.id,
+        from_node_id=a, from_output="x", to_node_id=b, to_input="y",
+    )
+    orch_tools.set_input_node(db, workflow.id, node_id=a)
+    orch_tools.set_output_node(db, workflow.id, node_id=b)
+
+    db.refresh(workflow)
+    snapshot = _serialize_workflow(workflow)
+
+    run = models.Run(
+        workflow_id=workflow.id,
+        kind="user",
+        status="success",
+        inputs={},
+        workflow_snapshot=snapshot,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    # Mutate the live graph: rename a node and delete the other.
+    orch_tools.rename_node(db, workflow.id, node_id=a, new_name="renamed_loader")
+    orch_tools.remove_node(db, workflow.id, node_id=b)
+
+    # The run's snapshot is untouched — same node names, same edge, same code.
+    db.expire_all()
+    persisted = db.get(models.Run, run.id)
+    assert persisted is not None
+    snap = persisted.workflow_snapshot
+    assert snap is not None
+    snap_names = sorted(n["name"] for n in snap["nodes"])
+    assert snap_names == ["loader", "summariser"]
+    assert snap["input_node_id"] == a
+    assert snap["output_node_id"] == b
+    assert len(snap["edges"]) == 1
+    # Code is preserved so the canvas can show what actually ran.
+    loader = next(n for n in snap["nodes"] if n["name"] == "loader")
+    assert "return {'x': 1}" in loader["code"]
+    # Position is preserved so the canvas can re-render without re-laying out.
+    assert "position" in loader and "x" in loader["position"]
+
+
+def test_render_history_surfaces_tool_result(db, workflow):
+    """Persisted tool blocks should carry their `result` payload so the chat
+    panel can render rich tool cards (e.g. `run_workflow`) on history reload,
+    not only during the live stream."""
+    sess = models.Session(workflow_id=workflow.id)
+    db.add(sess); db.commit(); db.refresh(sess)
+
+    db.add(models.Message(session_id=sess.id, role="user", content="run it"))
+    db.add(
+        models.Message(
+            session_id=sess.id,
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "tc_run",
+                    "type": "function",
+                    "function": {
+                        "name": "run_workflow",
+                        "arguments": json.dumps({"inputs": {}}),
+                    },
+                }
+            ],
+        )
+    )
+    db.add(
+        models.Message(
+            session_id=sess.id,
+            role="tool",
+            tool_call_id="tc_run",
+            name="run_workflow",
+            content=json.dumps(
+                {
+                    "run_id": "abc",
+                    "status": "success",
+                    "outputs": {"summary": "hi"},
+                    "node_errors": [],
+                    "error": None,
+                    "total_cost": 0.04,
+                }
+            ),
+        )
+    )
+    db.commit()
+
+    bubbles = orch_agent.render_history(db, sess.id)
+    asst = bubbles[1]
+    tool_block = next(b for b in asst["content"] if b["t"] == "tool")
+    assert tool_block["tool"] == "run_workflow"
+    assert tool_block["status"] == "ok"
+    assert tool_block["result"]["run_id"] == "abc"
+    assert tool_block["result"]["total_cost"] == 0.04
 
 
 def test_non_graph_mutating_tools_set_matches_registry():
-    # Belt-and-braces: the named-set has to match what's actually safe to call
-    # while a workflow run is in flight.
+    # Belt-and-braces: the named-set has to match what's exempt from the
+    # dispatcher's "no mutation during a run" guard. Inspection tools and
+    # `run_workflow` qualify; `run_workflow` does its own active-run check
+    # internally with a clearer error message.
     assert orch_tools.NON_GRAPH_MUTATING_TOOLS == {
         "view_graph",
         "view_node_details",
-        "shell",
-        "web_search",
-        "web_fetch",
+        "view_run",
+        "run_workflow",
     }
     for name in orch_tools.NON_GRAPH_MUTATING_TOOLS:
         assert name in orch_tools.REGISTRY

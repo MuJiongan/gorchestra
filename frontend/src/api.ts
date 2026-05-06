@@ -61,6 +61,8 @@ export const api = {
 
   startRun: (wid: string, inputs: Record<string, unknown>) =>
     request<Run>('POST', `/api/workflows/${wid}/runs`, { inputs, kind: 'user' }),
+  rerunFromSnapshot: (rid: string, inputs: Record<string, unknown>) =>
+    request<Run>('POST', `/api/runs/${rid}/rerun`, { inputs, kind: 'user' }),
   cancelRun: (rid: string) =>
     request<{ cancelled: boolean }>('POST', `/api/runs/${rid}/cancel`),
   getRun: (rid: string) => request<Run>('GET', `/api/runs/${rid}`),

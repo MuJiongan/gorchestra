@@ -12,8 +12,17 @@ interface Props {
   currentRun: CurrentRun | null;
   onStart: (inputs: Record<string, unknown>) => void;
   onCancel: () => void;
-  onClose: () => void;
+  /** Optional close handler. When omitted, the panel is treated as the
+   * always-on default surface and the close button is hidden. */
+  onClose?: () => void;
   onSendErrorToOrchestrator: (message: string) => void;
+  /** When set, the history list shows a "view on canvas" affordance per run.
+   * The host (App) handles fetching the snapshot and swapping the canvas. */
+  onViewRunOnCanvas?: (runId: string) => void;
+  /** True while an orchestrator turn is streaming for this workflow. The
+   * graph may be mid-build (added nodes, no edges yet) or about to mutate
+   * again — manual runs are blocked until the turn settles. */
+  orchestrating?: boolean;
 }
 
 function buildErrorPrompt({
@@ -409,12 +418,13 @@ export function RunPanel({
   onCancel,
   onClose,
   onSendErrorToOrchestrator,
+  onViewRunOnCanvas,
+  orchestrating,
 }: Props) {
   const inputNode = workflow.nodes.find((n) => n.id === workflow.input_node_id);
   const inputPorts: IOPort[] = inputNode?.inputs ?? [];
   const [values, setValues] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<Run[]>([]);
-  const [historicalRun, setHistoricalRun] = useState<Run | null>(null);
 
   // Only consider currentRun ours if it belongs to the workflow we're showing.
   // Guards against stale state leaking across workflows (e.g. after deleting
@@ -459,7 +469,6 @@ export function RunPanel({
       }
       try { inputs[p.name] = JSON.parse(raw); } catch { inputs[p.name] = raw; }
     }
-    setHistoricalRun(null);
     onStart(inputs);
   };
 
@@ -472,12 +481,14 @@ export function RunPanel({
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="smallcaps">run</span>
           <span style={{ flex: 1 }} />
-          <button
-            className="ed-btn ed-btn--mini"
-            onClick={onClose}
-          >
-            close <span className="ed-btn__mark">×</span>
-          </button>
+          {onClose && (
+            <button
+              className="ed-btn ed-btn--mini"
+              onClick={onClose}
+            >
+              close <span className="ed-btn__mark">×</span>
+            </button>
+          )}
         </div>
         <div
           className="serif"
@@ -536,7 +547,7 @@ export function RunPanel({
           </div>
         ))}
 
-        {ownRun && !historicalRun && (
+        {ownRun && (
           <RunTraceCard
             workflow={workflow}
             runId={ownRun.id}
@@ -545,14 +556,6 @@ export function RunPanel({
             cost={ownRun.totalCost}
             outputs={ownRun.finalOutputs}
             traces={traces}
-            onSendErrorToOrchestrator={onSendErrorToOrchestrator}
-          />
-        )}
-
-        {historicalRun && (
-          <HistoricalRunCard
-            workflow={workflow}
-            run={historicalRun}
             onSendErrorToOrchestrator={onSendErrorToOrchestrator}
           />
         )}
@@ -569,39 +572,23 @@ export function RunPanel({
               }}
             >
               <span>recent runs</span>
-              {historicalRun && ownRun && (
-                <button
-                  type="button"
-                  onClick={() => setHistoricalRun(null)}
-                  className="smallcaps"
-                  style={{
-                    fontSize: 9,
-                    color: 'var(--ink-4)',
-                    background: 'transparent',
-                    border: 0,
-                    cursor: 'pointer',
-                    padding: 0,
-                  }}
-                  title="clear historical view"
-                >
-                  back to current ×
-                </button>
-              )}
             </div>
             {history.slice(0, 8).map((h) => {
-              const isActive = historicalRun?.id === h.id;
               const summary = summariseRun(h);
               const isId = summary.kind === 'id';
               return (
                 <button
                   key={h.id}
-                  onClick={async () => {
-                    if (isActive) {
-                      setHistoricalRun(null);
-                      return;
-                    }
-                    setHistoricalRun(await api.getRun(h.id));
-                  }}
+                  type="button"
+                  onClick={() => onViewRunOnCanvas?.(h.id)}
+                  disabled={!onViewRunOnCanvas}
+                  title={
+                    onViewRunOnCanvas
+                      ? "view this run's graph on the canvas"
+                      : isId
+                        ? h.id
+                        : summary.text
+                  }
                   style={{
                     display: 'flex',
                     width: '100%',
@@ -609,23 +596,18 @@ export function RunPanel({
                     margin: '0 -8px',
                     alignItems: 'baseline',
                     gap: 8,
-                    background: isActive ? 'var(--paper-2)' : 'transparent',
-                    border: 0,
+                    background: 'transparent',
                     borderBottom: '1px solid var(--rule-2)',
-                    cursor: 'pointer',
+                    border: 0,
+                    cursor: onViewRunOnCanvas ? 'pointer' : 'default',
                     textAlign: 'left',
                   }}
-                  title={isId ? h.id : summary.text}
                 >
                   <span
                     className={isId ? 'mono' : 'serif'}
                     style={{
                       fontSize: isId ? 10.5 : 12.5,
-                      color: isActive
-                        ? 'var(--ink)'
-                        : isId
-                          ? 'var(--ink-4)'
-                          : 'var(--ink-2)',
+                      color: isId ? 'var(--ink-4)' : 'var(--ink-2)',
                       flex: 1,
                       minWidth: 0,
                       overflow: 'hidden',
@@ -661,22 +643,29 @@ export function RunPanel({
             fontSize: 12,
           }}
         >
-          {running
-            ? 'running…'
-            : status === 'success'
-              ? 'ready — tweak inputs and rerun'
-              : status === 'error'
-                ? 'failed — adjust and try again'
-                : status === 'cancelled'
-                  ? 'cancelled — adjust and rerun'
-                  : 'standing by'}
+          {orchestrating
+            ? 'orchestrator working — wait for it to settle'
+            : running
+              ? 'running…'
+              : status === 'success'
+                ? 'ready — tweak inputs and rerun'
+                : status === 'error'
+                  ? 'failed — adjust and try again'
+                  : status === 'cancelled'
+                    ? 'cancelled — adjust and rerun'
+                    : 'standing by'}
         </span>
         {running ? (
           <button className="ed-btn ed-btn--danger" onClick={onCancel}>
             cancel <span className="ed-btn__mark">×</span>
           </button>
         ) : (
-          <button className="ed-btn ed-btn--primary" onClick={start} disabled={!inputNode}>
+          <button
+            className="ed-btn ed-btn--primary"
+            onClick={start}
+            disabled={!inputNode || !!orchestrating}
+            title={orchestrating ? 'wait until the orchestrator finishes its turn' : undefined}
+          >
             {status === 'error' || status === 'cancelled'
               ? 'try again'
               : status === 'success'
@@ -1306,157 +1295,6 @@ function NestedToolCard({ tc }: { tc: NestedToolCall }) {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function HistoricalRunCard({
-  workflow, run, onSendErrorToOrchestrator,
-}: {
-  workflow: WorkflowDetail;
-  run: Run;
-  onSendErrorToOrchestrator: (message: string) => void;
-}) {
-  const hasFinal = run.status === 'success' && run.outputs && Object.keys(run.outputs).length > 0;
-  return (
-    <div
-      style={{
-        marginTop: 14,
-        padding: 16,
-        background: 'var(--paper-2)',
-        border: '1px solid var(--rule)',
-        borderRadius: 3,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
-        <span
-          className="smallcaps"
-          style={{
-            color:
-              run.status === 'success' ? 'var(--state-ok)' :
-              run.status === 'error' ? 'var(--state-err)' : 'var(--ink-3)',
-          }}
-        >
-          {run.status === 'success' ? '✓ replay' :
-           run.status === 'error' ? '× replay' :
-           `· ${run.status}`}
-        </span>
-        <span style={{ flex: 1 }} />
-        <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-4)' }}>
-          {run.id.slice(0, 8)}
-        </span>
-      </div>
-      {run.error && (
-        <>
-          <pre
-            className="mono"
-            style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
-          >
-            {run.error}
-          </pre>
-          <SendErrorButton
-            onClick={() =>
-              onSendErrorToOrchestrator(buildErrorPrompt({ runId: run.id, error: run.error ?? '' }))
-            }
-          />
-        </>
-      )}
-      {hasFinal && <FinalOutputBlock workflow={workflow} outputs={run.outputs} />}
-      <details open={!hasFinal} style={{ marginTop: hasFinal ? 4 : 0 }}>
-        <summary
-          className="smallcaps"
-          style={{
-            cursor: 'pointer',
-            padding: '4px 0',
-            color: 'var(--ink-3)',
-            fontSize: 10,
-          }}
-        >
-          trace · {run.node_runs.length} {run.node_runs.length === 1 ? 'node' : 'nodes'}
-        </summary>
-        <div style={{ marginTop: 6 }}>
-      {run.node_runs.map((nr) => {
-        const nodeName = workflow.nodes.find((n) => n.id === nr.node_id)?.name ?? nr.node_id;
-        return (
-          <details key={nr.id} style={{ marginBottom: 6 }}>
-            <summary
-              style={{
-                cursor: 'pointer',
-                padding: '6px 0',
-                borderBottom: '1px solid var(--rule-2)',
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 8,
-              }}
-            >
-              <span className={`node-state-dot ${STATE_CLASS[nr.status]}`} />
-              <span className="mono" style={{ fontSize: 11.5 }}>{nodeName}</span>
-              <span style={{ flex: 1 }} />
-              <span className="smallcaps" style={{ fontSize: 9 }}>
-                {nr.status} · {nr.duration_ms}ms
-              </span>
-            </summary>
-            <div
-              style={{
-                padding: '8px 0 8px 14px',
-                marginLeft: 4,
-                borderLeft: '1px solid var(--rule-2)',
-              }}
-            >
-              {nr.error && (
-                <>
-                  <pre
-                    className="mono"
-                    style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
-                  >
-                    {nr.error}
-                  </pre>
-                  <SendErrorButton
-                    onClick={() =>
-                      onSendErrorToOrchestrator(
-                        buildErrorPrompt({ runId: run.id, nodeName, error: nr.error ?? '' }),
-                      )
-                    }
-                  />
-                </>
-              )}
-              <NodeIOBlock
-                workflow={workflow}
-                nodeId={nr.node_id}
-                nodeName={nodeName}
-                inputs={nr.inputs}
-                outputs={nr.outputs}
-                logs={nr.logs.length ? nr.logs : undefined}
-              />
-              {nr.llm_calls.length > 0 && (
-                <div style={{ marginBottom: 8 }}>
-                  <div className="smallcaps" style={{ marginBottom: 4 }}>llm calls</div>
-                  <ValueRow
-                    label={`${nr.llm_calls.length} ${nr.llm_calls.length === 1 ? 'call' : 'calls'}`}
-                    value={nr.llm_calls}
-                    viewerTitle={`${nodeName} · llm calls`}
-                  />
-                </div>
-              )}
-              {nr.tool_calls.length > 0 && (
-                <div style={{ marginBottom: 8 }}>
-                  <div className="smallcaps" style={{ marginBottom: 4 }}>tool calls</div>
-                  <ValueRow
-                    label={`${nr.tool_calls.length} ${nr.tool_calls.length === 1 ? 'call' : 'calls'}`}
-                    value={nr.tool_calls}
-                    viewerTitle={`${nodeName} · tool calls`}
-                  />
-                </div>
-              )}
-            </div>
-          </details>
-        );
-      })}
-        </div>
-      </details>
-      <div className="serif" style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 10 }}>
-        cost — ${run.total_cost.toFixed(4)}
-      </div>
     </div>
   );
 }

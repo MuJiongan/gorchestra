@@ -12,7 +12,6 @@ from typing import Any
 from sqlalchemy.orm import Session as DbSession
 
 from app import models, schemas
-from app.runner import tools as _runtime_tools
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +242,25 @@ def remove_edge(db: DbSession, wid: str, *, edge_id: str) -> dict:
     return {"removed_edge_id": edge_id}
 
 
+def clean_canvas(db: DbSession, wid: str) -> dict:
+    """Wipe the workflow's graph: delete every node + edge and clear the
+    input/output node pointers. The Workflow row itself stays (so the
+    orchestrator session, runs, and run history are preserved).
+
+    A session often spans multiple distinct workflows in sequence — e.g. a
+    scoping workflow, then a solve workflow informed by what it found, then
+    maybe a verify workflow. `clean_canvas` is the *transition* between
+    stages: clear the canvas, build the next stage's graph, run it.
+    """
+    w = _get_workflow(db, wid)
+    n_edges = db.query(models.Edge).filter_by(workflow_id=wid).delete(synchronize_session=False)
+    n_nodes = db.query(models.Node).filter_by(workflow_id=wid).delete(synchronize_session=False)
+    w.input_node_id = None
+    w.output_node_id = None
+    db.commit()
+    return {"cleared": True, "removed_nodes": int(n_nodes), "removed_edges": int(n_edges)}
+
+
 def set_input_node(db: DbSession, wid: str, *, node_id: str) -> dict:
     n = _get_node(db, wid, node_id)
     w = _get_workflow(db, wid)
@@ -302,31 +320,228 @@ def view_node_details(db: DbSession, wid: str, *, node_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# graph-building research tools — same callables the node runtime uses,
-# rebound here so the orchestrator can reach for them *before* mutating the
-# graph (e.g. probe a repo with `shell`, look up an API with `web_search`,
-# read a doc with `web_fetch`). The prompt restricts when they're called;
-# the dispatcher just delegates.
+# run trigger — kicks off a workflow run with explicit inputs and returns
+# immediately with `{run_id, status: "running"}`. The agent loop detects
+# this shape, emits a `run_started` chat event so the frontend can attach
+# its run panel to the live WS, then waits via `wait_for_run` for the
+# materialised final result before letting the LLM see it.
 # ---------------------------------------------------------------------------
 
 
-def shell(db: DbSession, wid: str, *, command: str, timeout: int = 30) -> dict:
-    return _runtime_tools.shell(command=command, timeout=timeout)
-
-
-def web_search(db: DbSession, wid: str, *, query: str, max_results: int = 10) -> dict:
-    return _runtime_tools.web_search(query=query, max_results=max_results)
-
-
-def web_fetch(
+def run_workflow(
     db: DbSession,
     wid: str,
     *,
-    urls: list[str],
-    objective: str,
-    full_content: bool,
+    inputs: dict | None = None,
 ) -> dict:
-    return _runtime_tools.web_fetch(urls=urls, objective=objective, full_content=full_content)
+    """Kick off a workflow run with the given inputs in a background thread
+    and return immediately with ``{run_id, status: "running"}``. The agent
+    loop turns this into a ``run_started`` chat event (so the run panel
+    can attach to the WS), waits for completion via :func:`wait_for_run`,
+    and replaces this stub with the materialised result before the LLM
+    sees a tool result.
+    """
+    # Lazy imports to avoid a load-time cycle between the orchestrator package
+    # and the api routers.
+    import threading
+    from app.api.runs import _serialize_workflow, _execute_run
+    from app.runner import events as ev_mod
+
+    w = _get_workflow(db, wid)
+
+    if not w.input_node_id:
+        return {"error": "workflow has no input node — designate one with set_input_node first"}
+    if not w.output_node_id:
+        return {"error": "workflow has no output node — designate one with set_output_node first"}
+
+    # Refuse to start a second run while one is in flight for this workflow.
+    active = _active_run_id(db, wid)
+    if active is not None:
+        return {"error": f"another run ({active}) is already in progress for this workflow; wait for it to finish or cancel it"}
+
+    inputs = inputs or {}
+    input_node = db.get(models.Node, w.input_node_id)
+    if input_node is None:
+        return {"error": f"input node {w.input_node_id} not found"}
+    declared_names = {p.get("name") for p in (input_node.inputs or [])}
+    required_names = {p.get("name") for p in (input_node.inputs or []) if p.get("required")}
+    missing = sorted(required_names - set(inputs.keys()))
+    if missing:
+        return {"error": f"missing required inputs on {input_node.name!r}: {missing}"}
+    extra = sorted(set(inputs.keys()) - declared_names)
+    if extra:
+        return {"error": f"unknown inputs for {input_node.name!r}: {extra} (declared: {sorted(declared_names)})"}
+
+    # Resolve the default node model, mirroring the API's lookup so behaviour
+    # is identical whether a run is triggered via REST or via the orchestrator.
+    import os as _os
+    default_model = _os.getenv("DEFAULT_NODE_MODEL", "")
+    if not default_model:
+        setting = db.query(models.Setting).filter_by(key="default_node_model").first()
+        default_model = setting.value if setting and setting.value else ""
+    if not default_model:
+        default_model = "anthropic/claude-sonnet-4.6"
+
+    wf_data = _serialize_workflow(w)
+
+    run = models.Run(
+        workflow_id=wid,
+        kind="user",
+        status="running",
+        inputs=inputs,
+        workflow_snapshot=wf_data,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    run_id = run.id
+
+    # Pre-create the run state so any WS subscriber that connects mid-run
+    # doesn't race the first event.
+    ev_mod.get_or_create(run_id)
+
+    # Spawn the run in a daemon thread — same pattern the REST endpoint uses.
+    # The agent loop will yield a `run_started` chat event with this run_id
+    # (so the frontend can attach), then call `wait_for_run` to block on
+    # completion before returning the final result to the LLM.
+    threading.Thread(
+        target=_execute_run,
+        args=(run_id, wf_data, inputs, default_model),
+        daemon=True,
+    ).start()
+
+    return {"run_id": run_id, "status": "running"}
+
+
+def _materialise_run(
+    db: DbSession,
+    wid: str,
+    run_id: str,
+    *,
+    full: bool = False,
+) -> dict:
+    """Read a run's current state from the DB into a result dict. Works for
+    any status — running, success, error, cancelled — so this is shared
+    between the post-completion read in :func:`wait_for_run` and the
+    on-demand inspection in :func:`view_run`.
+
+    When ``full=False`` (the default, used by ``run_workflow``), only
+    ``{run_id, status, total_cost}`` is returned — the user inspects the
+    actual outputs in the run panel; the orchestrator doesn't relay them.
+    When ``full=True`` (used by ``view_run``), the full state is returned —
+    ``outputs``, ``node_errors``, and the top-level ``error`` field — so the
+    orchestrator can drill in on failure paths or answer follow-up
+    questions about a specific run."""
+    import time
+    from app.runner import events as ev_mod
+
+    db.expire_all()
+    run = db.get(models.Run, run_id)
+    if run is None or run.workflow_id != wid:
+        return {"error": f"run {run_id} not found in workflow {wid}"}
+
+    # Persist race: the runner appends `run_finished` (which sets
+    # `finished_event`) *before* `_execute_run` materialises and commits the
+    # final state to the DB. If the orchestrator calls `view_run` right
+    # after `run_workflow` returns on a fast run, we can land here while
+    # the in-memory stream says finished but the row still says "running".
+    # Briefly poll for the persist to catch up (bounded; we'd rather return
+    # stale than hang).
+    st = ev_mod.get(run_id)
+    if st is not None and st.finished and run.status == "running":
+        for _ in range(50):  # up to ~5s
+            time.sleep(0.1)
+            db.expire_all()
+            run = db.get(models.Run, run_id)
+            if run is None or run.status != "running":
+                break
+
+    if run is None:
+        return {"error": f"run {run_id} produced no result row"}
+
+    if not full:
+        return {
+            "run_id": run_id,
+            "status": run.status,
+            "total_cost": run.total_cost or 0.0,
+        }
+
+    node_names = {n.id: n.name for n in _get_workflow(db, wid).nodes}
+    node_errors: list[dict] = []
+    for nr in run.node_runs or []:
+        if nr.status == "error":
+            node_errors.append(
+                {
+                    "node_id": nr.node_id,
+                    "node_name": node_names.get(nr.node_id, nr.node_id),
+                    "error": nr.error or "unknown error",
+                }
+            )
+    return {
+        "run_id": run_id,
+        "status": run.status,
+        "outputs": run.outputs or {},
+        "node_errors": node_errors,
+        "error": run.error,
+        "total_cost": run.total_cost or 0.0,
+    }
+
+
+def wait_for_run(
+    db: DbSession,
+    wid: str,
+    run_id: str,
+    *,
+    cancel_event: Any = None,
+    poll_interval: float = 0.1,
+) -> dict:
+    """Block until the given run finishes, then return the lean
+    ``{run_id, status, total_cost}`` shape ``run_workflow`` exposes to the LLM.
+
+    Reads the terminal state from the in-memory event stream — *not* the DB.
+    The runner's ``finished_event`` fires the instant ``run_finished`` is
+    appended to the event log, but ``_execute_run`` persists to the DB
+    *after* that, in a background thread. Querying the DB on this edge
+    returns the stale ``status="running"`` row that ``run_workflow`` created
+    at the top, which is exactly the race we hit before this fix. The
+    materialised event stream is authoritative — that's what the run panel
+    renders too.
+
+    If ``cancel_event`` is provided and gets set, returns early with a
+    cancellation result; the run keeps executing in the background.
+    """
+    from app.runner import events as ev_mod
+    from app.runner.runner import materialize_run_result
+
+    run = db.get(models.Run, run_id)
+    if run is None or run.workflow_id != wid:
+        return {"error": f"run {run_id} not found in workflow {wid}"}
+
+    st = ev_mod.get_or_create(run_id)
+    while not st.finished:
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "run_id": run_id,
+                "status": "running",
+                "error": "orchestrator turn cancelled while waiting; run is still in progress",
+            }
+        st.finished_event.wait(timeout=poll_interval)
+
+    result = materialize_run_result(run_id)
+    return {
+        "run_id": run_id,
+        "status": result.get("status") or "error",
+        "total_cost": float(result.get("total_cost") or 0.0),
+    }
+
+
+def view_run(db: DbSession, wid: str, *, run_id: str) -> dict:
+    """Return a run's full current state from the DB: ``{run_id, status,
+    outputs, node_errors, error, total_cost}``. Use this on the error/cancelled
+    paths where ``run_workflow`` deliberately omits details, on a run that
+    was interrupted (e.g. the orchestrator turn was cancelled while waiting),
+    or to answer follow-up questions about a specific run."""
+    return _materialise_run(db, wid, run_id, full=True)
 
 
 # ---------------------------------------------------------------------------
@@ -345,22 +560,22 @@ REGISTRY = {
     "remove_edge": remove_edge,
     "set_input_node": set_input_node,
     "set_output_node": set_output_node,
-    "shell": shell,
-    "web_search": web_search,
-    "web_fetch": web_fetch,
+    "clean_canvas": clean_canvas,
+    "run_workflow": run_workflow,
+    "view_run": view_run,
 }
 
 
-# Tools that don't mutate the workflow graph — exempt from the
-# run-in-progress lock. Includes the read-only inspection tools and the
-# research tools (`shell`, `web_search`, `web_fetch`); none of them touch
-# graph state, so they're safe to call while a workflow is executing.
+# Tools that don't mutate the workflow graph — exempt from the dispatcher's
+# run-in-progress lock (which only blocks graph mutation). Includes the
+# read-only inspection tools and `run_workflow` itself — `run_workflow` does
+# its own active-run check internally with a clearer error message than the
+# generic "cannot mutate the graph" guard.
 NON_GRAPH_MUTATING_TOOLS: set[str] = {
     "view_graph",
     "view_node_details",
-    "shell",
-    "web_search",
-    "web_fetch",
+    "view_run",
+    "run_workflow",
 }
 
 
@@ -539,11 +754,73 @@ TOOL_SCHEMAS: dict[str, dict] = {
             },
         },
     },
-    # Research tools — `shell`, `web_search`, `web_fetch` — share their schemas
-    # with the node runtime (single source of truth in `app.runner.tools`).
-    # The "graph-building research only" guardrail lives in the system prompt,
-    # not in the per-tool description, since it's a cross-tool policy.
-    **{name: _runtime_tools.TOOL_SCHEMAS[name] for name in ("shell", "web_search", "web_fetch")},
+    "clean_canvas": {
+        "type": "function",
+        "function": {
+            "name": "clean_canvas",
+            "description": (
+                "Wipe the workflow's graph — delete every node + edge and clear the "
+                "input/output node pointers. The session, runs, and run history are "
+                "preserved. A session can host a *sequence of distinct workflows* on "
+                "the way to one answer — e.g. a scoping workflow, then a solve workflow "
+                "built on what it found, then a verify workflow. `clean_canvas` is the "
+                "transition between stages. For incremental refinements within the "
+                "current stage, patch in place instead."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    "run_workflow": {
+        "type": "function",
+        "function": {
+            "name": "run_workflow",
+            "description": (
+                "Trigger a workflow run with explicit inputs. The call returns once the run "
+                "finishes — you wait, and the user sees live progress + the actual outputs in "
+                "the run panel. Returns ONLY {run_id, status, total_cost} — outputs are not "
+                "relayed back to you. The user is the audience for outputs; on success, point "
+                "them at the run panel rather than summarising. Call only when you can "
+                "confidently supply the input node's required inputs from the conversation; "
+                "otherwise leave running to the user. Refuses if another run is already in "
+                "flight for this workflow."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inputs": {
+                        "type": "object",
+                        "description": (
+                            "Map of input port name → value for the workflow's input node. "
+                            "Keys must match the input node's declared input names. Every "
+                            "port marked `required` must be present."
+                        ),
+                    },
+                },
+                "required": ["inputs"],
+            },
+        },
+    },
+    "view_run": {
+        "type": "function",
+        "function": {
+            "name": "view_run",
+            "description": (
+                "Return a run's full state from the DB: {run_id, status, outputs, node_errors, "
+                "error, total_cost}. *Default: don't call this.* Use it ONLY when you "
+                "absolutely cannot proceed without the run's contents — diagnosing a failure "
+                "(`status: \"error\"` or `\"cancelled\"`), reading a research node's findings "
+                "before continuing the build, handing off between stages of a multi-workflow "
+                "solve where the previous run's outputs are the input to designing the next "
+                "graph, or checking on an interrupted run. On a successful end-user run, do "
+                "NOT call this just to summarise — the user reads outputs in the run panel."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"run_id": {"type": "string"}},
+                "required": ["run_id"],
+            },
+        },
+    },
 }
 
 

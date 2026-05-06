@@ -554,7 +554,33 @@ def run_turn(db: DbSession, session_id: str, user_text: str) -> Iterator[dict]:
                 }
 
                 result = orch_tools.execute(db, workflow_id, name, args)
-                ok = "error" not in (result or {})
+
+                # `run_workflow` returns immediately with `{run_id, status:"running"}`
+                # — the actual run executes in a background thread. Emit a
+                # `run_started` event so the frontend can attach its run panel
+                # to the live WS (same code path the manual Run button uses),
+                # then block here until the run finishes and replace `result`
+                # with the materialised final state before the LLM sees it.
+                if (
+                    name == "run_workflow"
+                    and isinstance(result, dict)
+                    and result.get("status") == "running"
+                    and result.get("run_id")
+                ):
+                    run_id = result["run_id"]
+                    yield {
+                        "kind": "run_started",
+                        "run_id": run_id,
+                        "workflow_id": workflow_id,
+                    }
+                    result = orch_tools.wait_for_run(
+                        db, workflow_id, run_id, cancel_event=cancel_event
+                    )
+
+                # `run_workflow` (and a few others) always include an `error`
+                # key, set to None on success — so check the *value*, not the
+                # key's presence.
+                ok = not (result or {}).get("error")
 
                 _persist_tool_result(db, session_id, tc_id, name, result)
 
@@ -634,13 +660,17 @@ def render_history(db: DbSession, session_id: str) -> list[dict]:
                     args = {}
                 summary = _format_args_summary(args)
                 tr = tool_results.get(tc_id)
-                ok = bool(tr) and "error" not in (tr.get("result") or {})
+                ok = bool(tr) and not (tr.get("result") or {}).get("error")
                 content.append(
                     {
                         "t": "tool",
                         "tool": name,
                         "args": summary,
                         "status": "ok" if ok else ("err" if tr else "pending"),
+                        # Surface the persisted result so the chat panel can
+                        # render rich tool cards (e.g. `run_workflow` snapshot
+                        # summary) on history reload, not just live streams.
+                        "result": tr.get("result") if tr else None,
                     }
                 )
             bubbles.append({"role": "assistant", "content": content})

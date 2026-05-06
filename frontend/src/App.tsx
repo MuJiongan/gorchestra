@@ -10,7 +10,7 @@ import { api } from './api';
 import { loadSettings, SETTINGS_CHANGED_EVENT } from './localSettings';
 import type {
   Workflow, WorkflowDetail, CurrentRun, RunEvent, RunStatus, NodeRunStatus,
-  OrchestratorEvent, ChatHistoryMessage, Run, RunWorkflowSnapshot,
+  OrchestratorEvent, ChatHistoryMessage, Run,
 } from './types';
 
 type View = 'workflow' | 'settings';
@@ -31,13 +31,15 @@ const GRAPH_MUTATING_TOOLS = new Set([
   'clean_canvas',
 ]);
 
-/** Coerce a workflow snapshot into a WorkflowDetail so the Canvas can render
- * it the same way it renders the live graph. The snapshot omits the
+/** Coerce a Run's `workflow_snapshot` into a WorkflowDetail so the Canvas can
+ * render it the same way it renders the live graph. The snapshot omits the
  * Workflow's user-visible `name` field; we synthesise one from the run id. */
-function snapshotDataToDetail(s: RunWorkflowSnapshot, runId: string): WorkflowDetail {
+function snapshotToDetail(run: Run): WorkflowDetail | null {
+  const s = run.workflow_snapshot;
+  if (!s) return null;
   return {
     id: s.id,
-    name: `run ${runId.slice(0, 8)}`,
+    name: `run ${run.id.slice(0, 8)}`,
     input_node_id: s.input_node_id,
     output_node_id: s.output_node_id,
     nodes: s.nodes.map((n) => ({
@@ -60,11 +62,6 @@ function snapshotDataToDetail(s: RunWorkflowSnapshot, runId: string): WorkflowDe
       to_input: e.to_input,
     })),
   };
-}
-
-function snapshotToDetail(run: Run): WorkflowDetail | null {
-  if (!run.workflow_snapshot) return null;
-  return snapshotDataToDetail(run.workflow_snapshot, run.id);
 }
 
 function historyToChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
@@ -135,16 +132,15 @@ export default function App() {
       if (!run.workflow_snapshot) return;
       // Running/pending runs don't have materialised node_runs yet — those
       // only land in the DB when the runner finishes. Attach to the live WS
-      // instead so node states and per-node trace stream in. The snapshot
-      // is pinned on the canvas the same way as for any other live run.
+      // instead so node states and per-node trace stream in. The canvas
+      // stays on the live workflow (the orchestrator's worldview); the
+      // user inspects per-node trace via NodePanel's `trace` tab.
       if (run.status === 'running' || run.status === 'pending') {
         setViewingRun(null);
         setSelectedSnapshotNodeId(null);
         setSelectedNodeId(null);
-        // Already watching this run — don't churn the WS. The user clicked
-        // it from the recent list while it's the current run; nothing to do.
         if (currentRun && currentRun.id === run.id) return;
-        attachToRunRef.current(run.id, run.workflow_id, run.status, run.workflow_snapshot);
+        attachToRunRef.current(run.id, run.workflow_id, run.status);
         return;
       }
       setViewingRun(run);
@@ -475,17 +471,11 @@ export default function App() {
 
   /** Open the run panel and attach a WS to the given run id. Used both by
    *  the manual Run button (after its POST resolves) and by the chat handler
-   *  when the orchestrator emits a `run_started` event for a run it kicked off.
-   *
-   *  `snapshot` lets the canvas reflect the *executing* graph instead of the
-   *  live one — pass it when known (manual run, rerun-from-snapshot). The
-   *  orchestrator path only has a run_id, so we lazy-fetch the snapshot via
-   *  `api.getRun` once attached. */
+   *  when the orchestrator emits a `run_started` event for a run it kicked off. */
   const attachToRun = (
     runId: string,
     workflowId: string,
     initialStatus: RunStatus = 'running',
-    snapshot: RunWorkflowSnapshot | null = null,
   ) => {
     setCurrentRun({
       id: runId,
@@ -497,20 +487,7 @@ export default function App() {
       finalOutputs: null,
       error: null,
       totalCost: 0,
-      snapshot,
     });
-    if (!snapshot) {
-      // Fire-and-forget: pull the snapshot from the Run row so the canvas
-      // can render it. Guarded against late races (run already swapped).
-      void api.getRun(runId).then((r) => {
-        if (!r.workflow_snapshot) return;
-        setCurrentRun((cur) =>
-          cur && cur.id === runId && !cur.snapshot
-            ? { ...cur, snapshot: r.workflow_snapshot }
-            : cur,
-        );
-      }).catch(() => { /* leave snapshot null; canvas falls back to live */ });
-    }
     wsRef.current?.close();
     const ws = new WebSocket(api.runEventsUrl(runId));
     wsRef.current = ws;
@@ -550,7 +527,7 @@ export default function App() {
   const startRun = async (inputs: Record<string, unknown>) => {
     if (!detail) return;
     const run = await api.startRun(detail.id, inputs);
-    attachToRun(run.id, detail.id, run.status, run.workflow_snapshot);
+    attachToRun(run.id, detail.id, run.status);
   };
 
   const attachToRunRef = useRef(attachToRun);
@@ -578,25 +555,15 @@ export default function App() {
         ? 'ready'
         : 'idle';
 
-  // Per-node state dots render whenever the canvas is bound to a single run's
-  // graph: a frozen snapshot view, or an in-flight run executing against its
-  // own snapshot. The live canvas (no run binding) stays clean — stale states
-  // overlaid on a graph that may have since been mutated were confusing.
+  // Per-node state dots render only in snapshot view — there the canvas
+  // *is* a single run's frozen graph so the dots are unambiguous. The live
+  // canvas stays clean: it's the orchestrator's worldview and may keep
+  // mutating, so overlaying run state on it would be misleading.
   const snapshotNodeStates: Record<string, NodeRunStatus> = viewingRun
     ? Object.fromEntries(
         viewingRun.node_runs.map((nr) => [nr.node_id, nr.status]),
       )
     : {};
-
-  // While `currentRun.snapshot` is set the canvas renders that snapshot —
-  // not the live `detail`. This holds for the run's full lifetime, in flight
-  // and after, so the live canvas stays unambiguously the editable surface
-  // and the running canvas stays unambiguously a frozen view. The exit
-  // banner above the canvas clears the snapshot to swap back to live.
-  const inFlightRunDetail: WorkflowDetail | null =
-    currentRun && currentRun.snapshot
-      ? snapshotDataToDetail(currentRun.snapshot, currentRun.id)
-      : null;
 
   return (
     <div
@@ -663,16 +630,6 @@ export default function App() {
                 {viewingRun && (
                   <SnapshotBanner run={viewingRun} onExit={exitSnapshotView} />
                 )}
-                {!viewingRun && inFlightRunDetail && currentRun && (
-                  <InFlightRunBanner
-                    run={currentRun}
-                    onExit={() =>
-                      setCurrentRun((cur) =>
-                        cur ? { ...cur, snapshot: null } : cur,
-                      )
-                    }
-                  />
-                )}
                 {/* Canvas (and the empty-canvas placeholder) need
                  * `position: relative` to host React Flow's absolute layout.
                  * Banner stacks above via flex; this wrapper takes the rest. */}
@@ -692,18 +649,6 @@ export default function App() {
                       />
                     ) : null;
                   })()
-                ) : inFlightRunDetail ? (
-                  // A run is executing — show *its* graph, with live node
-                  // states overlaid. Selection still maps to the live
-                  // workflow's nodes (ids match by construction); the right
-                  // side keeps showing the run panel since `selectedNodeId`
-                  // is null while the user is watching the run.
-                  <Canvas
-                    detail={inFlightRunDetail}
-                    selectedNodeId={selectedNodeId}
-                    onSelectNode={(id) => setSelectedNodeId(id)}
-                    nodeStates={currentRun!.nodeStates}
-                  />
                 ) : detail ? (
                   <Canvas
                     detail={detail}
@@ -775,17 +720,18 @@ export default function App() {
                           viewingRun.id,
                           inputs,
                         );
-                        // Drop snapshot view and attach the run panel to the
-                        // new live run. The snapshot is always pinned on
-                        // the canvas (running and post-completion alike);
-                        // the user clicks "← live" on the in-flight banner
-                        // to swap back to the editable canvas.
+                        // The rerun executes against the snapshot's frozen
+                        // graph in the background — but the canvas always
+                        // stays on the live workflow (the orchestrator's
+                        // worldview). Drop snapshot view and attach the run
+                        // panel to the new run; the user inspects per-node
+                        // trace by clicking nodes, or revisits the snapshot
+                        // graph via the recent-runs list.
                         exitSnapshotView();
                         attachToRunRef.current(
                           newRun.id,
                           newRun.workflow_id,
                           newRun.status,
-                          newRun.workflow_snapshot,
                         );
                       }}
                     />
@@ -945,110 +891,6 @@ export default function App() {
 // `workflow_snapshot`. The banner keeps the read-only state visible at all
 // times; the right-side panel summarises the run and offers a way back.
 // ---------------------------------------------------------------------------
-
-// Shows above the canvas while we're rendering the in-flight (or
-// recently-finished) run's frozen snapshot. The "← live" exit nulls
-// `currentRun.snapshot` so the canvas swaps back to the live detail.
-// Cancelling a still-running run is a different action — the run panel
-// owns it; this banner is purely a canvas-view toggle.
-function InFlightRunBanner({
-  run,
-  onExit,
-}: {
-  run: CurrentRun;
-  onExit: () => void;
-}) {
-  const isRunning = run.status === 'running' || run.status === 'pending';
-  const statusColor =
-    run.status === 'success'
-      ? 'var(--state-ok)'
-      : run.status === 'error'
-        ? 'var(--state-err)'
-        : isRunning
-          ? 'var(--ink-3)'
-          : 'var(--ink-4)';
-  const statusGlyph = isRunning
-    ? '·'
-    : run.status === 'success'
-      ? '✓'
-      : run.status === 'error'
-        ? '×'
-        : '·';
-  const label = isRunning ? 'running' : 'run';
-  return (
-    <div
-      style={{
-        padding: '6px 12px',
-        background: 'var(--paper-2)',
-        borderBottom: '1px solid var(--rule)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        fontSize: 11.5,
-        minWidth: 0,
-        flexShrink: 0,
-      }}
-    >
-      <span
-        style={{
-          display: 'inline-flex',
-          alignItems: 'baseline',
-          gap: 6,
-          minWidth: 0,
-          overflow: 'hidden',
-        }}
-      >
-        <span style={{ color: statusColor, fontSize: 10 }}>{statusGlyph}</span>
-        <span
-          className="serif"
-          style={{
-            fontStyle: 'italic',
-            color: 'var(--ink-3)',
-            fontSize: 12,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {label}
-        </span>
-        <span
-          className="mono"
-          style={{
-            color: 'var(--ink-4)',
-            fontSize: 10.5,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          {run.id.slice(0, 8)}
-        </span>
-      </span>
-      <span style={{ flex: 1 }} />
-      <button
-        type="button"
-        onClick={onExit}
-        style={{
-          background: 'transparent',
-          border: 0,
-          padding: '2px 0',
-          cursor: 'pointer',
-          color: 'var(--accent-ink)',
-          fontSize: 11.5,
-          fontFamily: 'var(--serif)',
-          fontStyle: 'italic',
-          whiteSpace: 'nowrap',
-        }}
-        title={
-          isRunning
-            ? 'return to the live editable canvas — the run keeps executing in the background'
-            : 'return to the live, editable canvas'
-        }
-      >
-        ← live
-      </button>
-    </div>
-  );
-}
 
 function SnapshotBanner({ run, onExit }: { run: Run; onExit: () => void }) {
   const statusColor =

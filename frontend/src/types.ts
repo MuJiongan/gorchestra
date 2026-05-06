@@ -201,14 +201,6 @@ export interface CurrentRun {
   finalOutputs: Record<string, unknown> | null;
   error: string | null;
   totalCost: number;
-  // Frozen graph this run is/was executing against. The canvas always
-  // renders this (not the live `detail`) for the run's full lifetime —
-  // running and post-completion alike — so the live canvas stays
-  // unambiguously editable and the running canvas stays unambiguously
-  // frozen. The user explicitly leaves via the in-flight banner's exit
-  // (which nulls this field). May also be null briefly while we async-fetch
-  // it after attaching by run_id alone (the orchestrator-triggered path).
-  snapshot: RunWorkflowSnapshot | null;
 }
 
 // --- orchestrator chat session --------------------------------------------

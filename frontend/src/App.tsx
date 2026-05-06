@@ -483,11 +483,12 @@ export default function App() {
     ensureNotificationPermission();
     const workflowName =
       workflows.find((w) => w.id === workflowId)?.name ?? 'workflow';
+    const startedAt = Date.now();
     setCurrentRun({
       id: runId,
       workflow_id: workflowId,
       status: initialStatus,
-      startedAt: Date.now(),
+      startedAt,
       events: [],
       nodeStates: {},
       finalOutputs: null,
@@ -507,6 +508,9 @@ export default function App() {
           workflowName,
           status: ev.status,
           error: ev.error,
+          outputs: ev.outputs,
+          totalCost: ev.total_cost,
+          durationMs: Date.now() - startedAt,
         });
       }
       setCurrentRun((cur) => {

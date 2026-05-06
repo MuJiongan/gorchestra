@@ -54,32 +54,33 @@ export function NodePanel({
   node, workflow, onClose, onChange, readOnly, pinnedRun, currentRun,
   onSendErrorToOrchestrator,
 }: Props) {
-  // Trace tab visibility:
-  //   - snapshot view: pinnedRun is set, the trace is the historical NodeRun
-  //     for this node within that run.
-  //   - in-flight run on this workflow: currentRun.events stream live; the
-  //     trace re-aggregates on each new event. Only counts when the run is
-  //     bound to this workflow id (avoids leaking state across workflows).
-  const liveRunOnThisWorkflow =
-    !pinnedRun &&
+  // Trace tab visibility + data source. Three regimes, in priority order:
+  //   1. The pinned run is also the live attached one (rerun-from-snapshot
+  //      mid-execution, viewed from snapshot view). Stream live events —
+  //      the historical NodeRun rows aren't materialised yet.
+  //   2. Pinned run only (snapshot view, post-completion). Read the
+  //      historical NodeRun for this node from the frozen Run row.
+  //   3. Live attached run on this workflow (no pin). Stream live events.
+  const liveRunForThisNode =
     currentRun &&
-    currentRun.workflow_id === workflow.id
+    currentRun.workflow_id === workflow.id &&
+    (!pinnedRun || currentRun.id === pinnedRun.id)
       ? currentRun
       : null;
 
   const trace: NodeTrace | null = useMemo(() => {
+    if (liveRunForThisNode) {
+      const all = aggregateEvents(liveRunForThisNode.events);
+      return all.find((t) => t.node_id === node.id) ?? null;
+    }
     if (pinnedRun) {
       const nr = pinnedRun.node_runs.find((x) => x.node_id === node.id);
       return nr ? nodeRunToTrace(nr) : null;
     }
-    if (liveRunOnThisWorkflow) {
-      const all = aggregateEvents(liveRunOnThisWorkflow.events);
-      return all.find((t) => t.node_id === node.id) ?? null;
-    }
     return null;
-  }, [pinnedRun, liveRunOnThisWorkflow?.events, node.id]);
+  }, [liveRunForThisNode?.events, pinnedRun, node.id]);
 
-  const traceTabAvailable = !!pinnedRun || !!liveRunOnThisWorkflow;
+  const traceTabAvailable = !!pinnedRun || !!liveRunForThisNode;
 
   const [tab, setTab] = useState<Tab>('code');
   const [code, setCode] = useState(node.code);
@@ -270,7 +271,7 @@ export function NodePanel({
               <NodeTraceCard
                 workflow={workflow}
                 trace={trace}
-                runId={pinnedRun?.id ?? liveRunOnThisWorkflow?.id}
+                runId={pinnedRun?.id ?? liveRunForThisNode?.id}
                 onSendErrorToOrchestrator={onSendErrorToOrchestrator}
               />
             ) : (
@@ -278,7 +279,7 @@ export function NodePanel({
                 className="serif"
                 style={{ fontStyle: 'italic', color: 'var(--ink-3)', fontSize: 13, lineHeight: 1.55 }}
               >
-                {liveRunOnThisWorkflow
+                {liveRunForThisNode
                   ? 'waiting for this node to start…'
                   : 'this node has no trace in the selected run.'}
               </div>

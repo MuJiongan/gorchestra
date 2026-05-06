@@ -201,6 +201,13 @@ export interface CurrentRun {
   finalOutputs: Record<string, unknown> | null;
   error: string | null;
   totalCost: number;
+  // True when this run executes against a frozen snapshot that may diverge
+  // from the live graph (rerun-from-snapshot). The live canvas suppresses
+  // its node-state overlay in that case — node ids in the snapshot can
+  // miss live nodes (and vice versa), so the dots would be misleading.
+  // Snapshot view is the right place to watch progress for these runs;
+  // the rerun handler stays in snapshot view while it executes.
+  executesOnSnapshot: boolean;
 }
 
 // --- orchestrator chat session --------------------------------------------

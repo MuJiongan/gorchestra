@@ -130,22 +130,23 @@ export default function App() {
     try {
       const run = await api.getRun(runId);
       if (!run.workflow_snapshot) return;
-      // Running/pending runs don't have materialised node_runs yet — those
-      // only land in the DB when the runner finishes. Attach to the live WS
-      // instead so node states and per-node trace stream in. The canvas
-      // stays on the live workflow (the orchestrator's worldview); the
-      // user inspects per-node trace via NodePanel's `trace` tab.
-      if (run.status === 'running' || run.status === 'pending') {
-        setViewingRun(null);
-        setSelectedSnapshotNodeId(null);
-        setSelectedNodeId(null);
-        if (currentRun && currentRun.id === run.id) return;
-        attachToRunRef.current(run.id, run.workflow_id, run.status);
-        return;
-      }
       setViewingRun(run);
       setSelectedSnapshotNodeId(null);
       setSelectedNodeId(null);
+      // For runs still executing, attach to the live WS so node-state dots
+      // animate on the snapshot canvas (snapshotNodeStates prefers
+      // currentRun.nodeStates when its id matches viewingRun.id) and the
+      // node panel's trace tab streams events. For terminal runs, the
+      // historical NodeRun rows are enough — no WS needed.
+      const isRunning = run.status === 'running' || run.status === 'pending';
+      if (isRunning && (!currentRun || currentRun.id !== run.id)) {
+        // We don't know whether this run executes on live or on a divergent
+        // snapshot (the click came from the recent-runs list, which doesn't
+        // distinguish). Mark it `executesOnSnapshot` so leaving snapshot
+        // view to live doesn't overlay potentially-mismatched dots there;
+        // snapshot view itself overlays correctly via id lookup.
+        attachToRunRef.current(run.id, run.workflow_id, run.status, /* executesOnSnapshot */ true);
+      }
     } catch {
       /* fetch failure: leave view as-is */
     }
@@ -476,6 +477,7 @@ export default function App() {
     runId: string,
     workflowId: string,
     initialStatus: RunStatus = 'running',
+    executesOnSnapshot: boolean = false,
   ) => {
     setCurrentRun({
       id: runId,
@@ -487,6 +489,7 @@ export default function App() {
       finalOutputs: null,
       error: null,
       totalCost: 0,
+      executesOnSnapshot,
     });
     wsRef.current?.close();
     const ws = new WebSocket(api.runEventsUrl(runId));
@@ -555,14 +558,18 @@ export default function App() {
         ? 'ready'
         : 'idle';
 
-  // Per-node state dots render only in snapshot view — there the canvas
-  // *is* a single run's frozen graph so the dots are unambiguous. The live
-  // canvas stays clean: it's the orchestrator's worldview and may keep
-  // mutating, so overlaying run state on it would be misleading.
+  // Per-node state dots for snapshot view. When the viewed run is the
+  // currently-attached one (rerun-from-snapshot, mid-execution), use live
+  // states from the WS so the dots animate on the snapshot canvas.
+  // Otherwise use the historical NodeRun rows (frozen post-completion).
+  // The live canvas has its own overlay below — this one's just for
+  // snapshot view.
   const snapshotNodeStates: Record<string, NodeRunStatus> = viewingRun
-    ? Object.fromEntries(
-        viewingRun.node_runs.map((nr) => [nr.node_id, nr.status]),
-      )
+    ? currentRun && currentRun.id === viewingRun.id
+      ? currentRun.nodeStates
+      : Object.fromEntries(
+          viewingRun.node_runs.map((nr) => [nr.node_id, nr.status]),
+        )
     : {};
 
   return (
@@ -654,6 +661,19 @@ export default function App() {
                     detail={detail}
                     selectedNodeId={selectedNodeId}
                     onSelectNode={(id) => setSelectedNodeId(id)}
+                    // Overlay live node states for runs that execute on the
+                    // live graph (manual run, orchestrator-triggered run).
+                    // Skip for snapshot reruns — their snapshot can diverge
+                    // from live, so dots may apply to wrong nodes or miss
+                    // entirely. Snapshot view is the right place to watch
+                    // those; the rerun handler keeps the user there.
+                    nodeStates={
+                      currentRun &&
+                      currentRun.workflow_id === detail.id &&
+                      !currentRun.executesOnSnapshot
+                        ? currentRun.nodeStates
+                        : undefined
+                    }
                   />
                 ) : (
                   <div
@@ -720,18 +740,21 @@ export default function App() {
                           viewingRun.id,
                           inputs,
                         );
-                        // The rerun executes against the snapshot's frozen
-                        // graph in the background — but the canvas always
-                        // stays on the live workflow (the orchestrator's
-                        // worldview). Drop snapshot view and attach the run
-                        // panel to the new run; the user inspects per-node
-                        // trace by clicking nodes, or revisits the snapshot
-                        // graph via the recent-runs list.
-                        exitSnapshotView();
+                        // The rerun executes against the snapshot's graph
+                        // (which may diverge from live), so the live canvas
+                        // can't show its progress reliably. Stay in
+                        // snapshot view — swap viewingRun to the new run
+                        // and attach the WS so node-state dots animate on
+                        // the snapshot canvas in real time. The user exits
+                        // via "← live" on the SnapshotBanner whenever
+                        // they're done watching.
+                        setViewingRun(newRun);
+                        setSelectedSnapshotNodeId(null);
                         attachToRunRef.current(
                           newRun.id,
                           newRun.workflow_id,
                           newRun.status,
+                          /* executesOnSnapshot */ true,
                         );
                       }}
                     />

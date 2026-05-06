@@ -259,8 +259,31 @@ def main() -> None:
                 finished_id = in_flight.pop(fut)
                 exc = fut.exception()
                 if exc is not None:
+                    # `_run_node` has its own try/except around user code, so
+                    # most failures emit a `node_finished` themselves. But
+                    # exceptions outside that block (e.g. emitting
+                    # `node_started`, building the Ctx) escape here and
+                    # would leave the frontend dot stuck on running. Emit a
+                    # synthetic node_finished so subscribers can resolve the
+                    # state.
+                    err_msg = f"{type(exc).__name__}: {exc}"
                     if shared["error"] is None:
-                        shared["error"] = f"{type(exc).__name__}: {exc}"
+                        shared["error"] = err_msg
+                    _emit(
+                        {
+                            "type": "node_finished",
+                            "node_id": finished_id,
+                            "status": "error",
+                            "inputs": {},
+                            "outputs": {},
+                            "logs": [],
+                            "llm_calls": [],
+                            "tool_calls": [],
+                            "error": err_msg,
+                            "duration_ms": 0,
+                            "cost": 0.0,
+                        }
+                    )
                     terminate_event.set()
                     continue
                 if terminate_event.is_set():

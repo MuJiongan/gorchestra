@@ -21,10 +21,14 @@ def _serialize_workflow(w: models.Workflow) -> dict:
             {
                 "id": n.id,
                 "name": n.name,
+                "description": n.description or "",
                 "code": n.code,
                 "inputs": n.inputs or [],
                 "outputs": n.outputs or [],
                 "config": n.config or {},
+                # Captured so a snapshot can be rendered on the canvas later
+                # without an extra layout pass.
+                "position": n.position or {"x": 0, "y": 0},
             }
             for n in w.nodes
         ],
@@ -86,6 +90,7 @@ def _run_to_out(run: models.Run, node_runs) -> schemas.RunOut:
         outputs=run.outputs or {},
         error=run.error,
         total_cost=run.total_cost or 0.0,
+        workflow_snapshot=run.workflow_snapshot,
         node_runs=[
             schemas.NodeRunOut(
                 id=nr.id,
@@ -111,18 +116,22 @@ def start_run(wid: str, body: schemas.RunStartIn, db: Session = Depends(get_db))
     if not w:
         raise HTTPException(404)
 
+    import os as _os
+    # Snapshot the graph that's about to run *before* writing the Run row, so
+    # the row carries a frozen copy of exactly what executed. The runner uses
+    # `wf_data`, not a re-read of the DB, so they can't drift.
+    wf_data = _serialize_workflow(w)
+
     run = models.Run(
         workflow_id=wid,
         kind=body.kind,
         status="running",
         inputs=body.inputs,
+        workflow_snapshot=wf_data,
     )
     db.add(run)
     db.commit()
     db.refresh(run)
-
-    import os as _os
-    wf_data = _serialize_workflow(w)
     # localStorage (forwarded via header → env by middleware) wins; DB row is
     # the backwards-compat fallback. Final fallback: a sane current default.
     default_model = _os.getenv("DEFAULT_NODE_MODEL", "")
@@ -141,6 +150,53 @@ def start_run(wid: str, body: schemas.RunStartIn, db: Session = Depends(get_db))
         daemon=True,
     ).start()
 
+    return _run_to_out(run, [])
+
+
+@router.post("/runs/{rid}/rerun", response_model=schemas.RunOut)
+def rerun_from_snapshot(rid: str, body: schemas.RunStartIn, db: Session = Depends(get_db)):
+    """Re-run a frozen graph snapshot with fresh inputs. The new run executes
+    against the *stored* `workflow_snapshot` of the source run — not the
+    current live workflow — so the user can re-run an old graph version
+    without restoring it. The new run carries a copy of the same snapshot.
+    """
+    src = db.get(models.Run, rid)
+    if src is None:
+        raise HTTPException(404)
+    if not src.workflow_snapshot:
+        raise HTTPException(400, detail="source run has no snapshot to re-run")
+    # Defensive: if the underlying workflow row was deleted, runs against it
+    # would orphan node_run rows — refuse.
+    if db.get(models.Workflow, src.workflow_id) is None:
+        raise HTTPException(404, detail="workflow no longer exists")
+
+    wf_data = src.workflow_snapshot
+
+    import os as _os
+    default_model = _os.getenv("DEFAULT_NODE_MODEL", "")
+    if not default_model:
+        setting = db.query(models.Setting).filter_by(key="default_node_model").first()
+        default_model = setting.value if setting and setting.value else ""
+    if not default_model:
+        default_model = "anthropic/claude-sonnet-4.6"
+
+    run = models.Run(
+        workflow_id=src.workflow_id,
+        kind=body.kind,
+        status="running",
+        inputs=body.inputs,
+        workflow_snapshot=wf_data,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    ev_mod.get_or_create(run.id)
+    threading.Thread(
+        target=_execute_run,
+        args=(run.id, wf_data, body.inputs, default_model),
+        daemon=True,
+    ).start()
     return _run_to_out(run, [])
 
 

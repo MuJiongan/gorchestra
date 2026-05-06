@@ -58,6 +58,33 @@ export interface NodeRun {
   cost: number;
 }
 
+export interface RunWorkflowSnapshotNode {
+  id: string;
+  name: string;
+  description?: string;
+  code: string;
+  inputs: IOPort[];
+  outputs: IOPort[];
+  config: NodeConfig;
+  position?: { x: number; y: number };
+}
+
+export interface RunWorkflowSnapshotEdge {
+  id: string;
+  from_node_id: string;
+  from_output: string;
+  to_node_id: string;
+  to_input: string;
+}
+
+export interface RunWorkflowSnapshot {
+  id: string;
+  input_node_id: string | null;
+  output_node_id: string | null;
+  nodes: RunWorkflowSnapshotNode[];
+  edges: RunWorkflowSnapshotEdge[];
+}
+
 export interface Run {
   id: string;
   workflow_id: string;
@@ -67,6 +94,7 @@ export interface Run {
   outputs: Record<string, unknown>;
   error: string | null;
   total_cost: number;
+  workflow_snapshot: RunWorkflowSnapshot | null;
   node_runs: NodeRun[];
 }
 
@@ -173,6 +201,13 @@ export interface CurrentRun {
   finalOutputs: Record<string, unknown> | null;
   error: string | null;
   totalCost: number;
+  // True when this run executes against a frozen snapshot that may diverge
+  // from the live graph (rerun-from-snapshot). The live canvas suppresses
+  // its node-state overlay in that case — node ids in the snapshot can
+  // miss live nodes (and vice versa), so the dots would be misleading.
+  // Snapshot view is the right place to watch progress for these runs;
+  // the rerun handler stays in snapshot view while it executes.
+  executesOnSnapshot: boolean;
 }
 
 // --- orchestrator chat session --------------------------------------------
@@ -243,5 +278,10 @@ export type OrchestratorEvent =
       status: 'ok' | 'err';
       result?: unknown;
     }
+  // Emitted by the agent loop when the orchestrator's `run_workflow` tool
+  // kicks off a run. The frontend attaches the run panel to the run's WS
+  // (same code path the manual Run button uses), so the user sees live
+  // progress while the orchestrator awaits the result.
+  | { kind: 'run_started'; run_id: string; workflow_id: string }
   | { kind: 'error'; message: string }
   | { kind: 'done' };

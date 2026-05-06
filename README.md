@@ -8,7 +8,7 @@ See `docs/PRD.md` for the full design.
 
 ## Status
 
-Phases 0–5 are implemented:
+Phases 0–6 are implemented:
 
 - **Phase 0** Backend (FastAPI) + frontend (Vite/React/React Flow/Monaco) scaffold.
 - **Phase 1** Execution engine: tool registry (`shell`, `web_search`, `web_fetch`),
@@ -26,10 +26,18 @@ Phases 0–5 are implemented:
   mutation tool surface (`add_node` / `add_edge` / `configure_node` / …), live
   canvas refresh, `user_edited` awareness so hand-edits to node code are
   preserved across orchestrator turns, mid-turn cancel + supersession.
+- **Phase 6** Orchestrator-driven runs: `run_workflow` triggers a run from
+  chat (the agent loop attaches the run panel to the live WS, then waits for
+  the result), `view_run` inspects a finished run's outputs / errors,
+  `clean_canvas` wipes the graph as a seam between stages of multi-workflow
+  solves (scope→solve, solve→verify, …). Runs carry a frozen
+  `workflow_snapshot` so the canvas can re-render an old run's graph after
+  the live workflow has been mutated, and old snapshots are re-runnable
+  with fresh inputs.
 
-Not yet built (see PRD §10 for the full list): orchestrator-driven test runs
-(`run_workflow` / `get_run` / `generate_test_data`), file-typed inputs, run
-pruning, single-package install.
+Not yet built (see PRD §10 for the full list): generative UI / designer
+agent, `generate_test_data`, file-typed inputs, run pruning, single-package
+install.
 
 ## Run it
 

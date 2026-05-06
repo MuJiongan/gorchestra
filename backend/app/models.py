@@ -62,6 +62,10 @@ class Run(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     total_cost = Column(Float, default=0.0)
+    # Frozen at run creation: full graph (nodes + code + edges + in/out node ids)
+    # the runner actually executed. Lets the canvas re-render an old run's
+    # graph even after the live workflow has been mutated.
+    workflow_snapshot = Column(JSON, nullable=True)
     workflow = relationship("Workflow", back_populates="runs")
     node_runs = relationship("NodeRun", back_populates="run", cascade="all, delete-orphan")
 

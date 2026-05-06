@@ -109,6 +109,9 @@ class RunOut(BaseModel):
     outputs: dict[str, Any]
     error: str | None = None
     total_cost: float
+    # Frozen graph the runner actually executed (nodes + code + edges + in/out
+    # node ids). `None` for legacy rows created before snapshotting landed.
+    workflow_snapshot: dict[str, Any] | None = None
     node_runs: list[NodeRunOut]
 
 

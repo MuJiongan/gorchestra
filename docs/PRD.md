@@ -18,7 +18,7 @@ Single-user, localhost-only for v1.
 | **Edge** | Connects one node's named output to another node's named input. |
 | **Session** | One orchestrator chat conversation attached to a workflow. v1 keeps one session per workflow; the data model allows multiple. Persistent. |
 | **Orchestrator** | An LLM agent that builds and refines the workflow using a fixed graph-mutation tool surface. Owns the chat side of a session. |
-| **Run** | A single execution of the workflow. The data model has `kind = "user" | "test"` for orchestrator-initiated test runs, but only `user` runs exist in v1 (the orchestrator cannot trigger runs yet — see §10). |
+| **Run** | A single execution of the workflow. Triggered either by the user via the run panel or by the orchestrator via its `run_workflow` tool (same code path, same WS event stream). Each run carries a frozen `workflow_snapshot` of the graph that actually executed, so the canvas can re-render historical runs after the live graph has been mutated, and old snapshots are re-runnable with fresh inputs. |
 
 ## 4. User Flows
 
@@ -31,15 +31,17 @@ Single-user, localhost-only for v1.
 
 ### 4.2 Refining
 - The chat panel is a persistent conversation per workflow. The user can ask: "make node X also do Y," "add a node that does Z," "this is too slow, simplify."
-- The orchestrator can mutate the graph again at any time *except* while a workflow run is executing — graph mutations are blocked then; read-only inspection (`view_graph`, `view_node_details`) is always allowed.
+- The orchestrator can mutate the graph again at any time *except* while a workflow run is executing — graph mutations are blocked then; read-only inspection (`view_graph`, `view_node_details`, `view_run`) is always allowed.
 - Sending a new user message while the orchestrator is mid-turn supersedes the in-flight turn (cancellation signal). There's also an explicit cancel button.
+- A single user request often produces *more than one workflow*, run in sequence: a small scoping workflow whose outputs inform the design of a solve workflow, or a solve workflow followed by a verifier. `clean_canvas` is the seam between stages — it wipes the graph but preserves session, runs, and history, so each stage is its own fully-built workflow.
 
 ### 4.3 Running
 - The user clicks **run**. A side panel slides in (expandable to fullscreen) with a form generated from the input node's declared inputs. Each input is a textarea — JSON is parsed if it looks like JSON, otherwise the raw string is sent. (File upload for file-typed inputs is on the roadmap; see §10.)
+- Alternatively, the orchestrator triggers the run itself via `run_workflow` whenever it can supply every required input from the conversation. The agent loop emits a `run_started` chat event, the frontend attaches the run panel to the live WS (same code path as the manual button), and the orchestrator blocks until the run finishes before continuing the turn.
 - Submitting kicks off a workflow run. Per-node states light up on the canvas via a WebSocket stream (`idle → running → success / error / skipped`).
 - The run panel shows a live trace per node: logs, LLM calls (model + content + cost), tool calls, inputs, outputs, errors. The output node's final result renders at the bottom alongside total cost.
 - The user can hit **cancel** mid-run; the runner subprocess is SIGTERM'd and a `cancelled` terminal event fires.
-- Recent runs (up to 20 stored) are listed and replayable in the run panel.
+- Recent runs (up to 20 stored) are listed and replayable in the run panel. Each run can also be re-run from its frozen `workflow_snapshot` — useful for re-executing an older graph version with fresh inputs without restoring it.
 
 ### 4.4 Editing a node directly
 - The user clicks a node → side panel opens with tabs: **code** (Monaco editor), **i/o** (read-only — topology is orchestrator-owned), **config** (model + enabled tools), **last run** (trace).
@@ -51,11 +53,11 @@ Single-user, localhost-only for v1.
 ### 5.1 Orchestrator
 - LLM agent over OpenRouter; default model is read from the user's settings (`default_orchestrator_model`), falling back to `anthropic/claude-opus-4.7`.
 - Always-on extended thinking (`reasoning.effort = "medium"`). Reasoning details are persisted alongside each assistant message and replayed verbatim on the next turn — Anthropic enforces ordering of these blocks.
-- System prompt covers: graph semantics, node runtime contract, available runtime tools, null-propagation rules, required-vs-optional inputs, the distinction between graph-shaping tools (the orchestrator calls these) and node-runtime tools (it equips nodes with these), tone conventions, and how to handle `user_edited` nodes.
-- Streams reasoning chunks, visible content chunks, tool-call start/end events, errors, and a terminal `done` event over **Server-Sent Events** (`POST /api/sessions/{sid}/messages`).
+- System prompt covers: graph semantics, node runtime contract, available runtime tools, null-propagation rules, required-vs-optional inputs, the distinction between graph-shaping tools (the orchestrator calls these) and node-runtime tools (it equips nodes with these), the *always build a workflow* principle, the research-via-node pattern (build a small probing node, run it, read the output back to inform design), multi-workflow staging with `clean_canvas` between stages, when to call `run_workflow` vs. leave running to the user, when to call `view_run` (default: don't — only on failure paths, research-node payloads, or stage handoffs), tone conventions, and how to handle `user_edited` nodes.
+- Streams reasoning chunks, visible content chunks, tool-call start/end events, `run_started` events when `run_workflow` kicks off a run, errors, and a terminal `done` event over **Server-Sent Events** (`POST /api/sessions/{sid}/messages`).
 - Per-turn it injects a fresh `[current graph state]` system message — every node's id/name/description/ports/model/tools/`user_edited` flag, every edge, and the input/output node ids. Code is intentionally omitted; the orchestrator pulls it via `view_node_details` when needed.
-- Has access to live workflow state across turns. It does **not** have access to run results in v1 (it cannot trigger runs).
-- Per-session cancellation: a new user message supersedes the in-flight turn; an explicit `POST /api/sessions/{sid}/cancel` signals it as a clean cancel. Mid-stream cancels are detected at LLM-round and tool-call boundaries; if a tool batch was already started, cancellation results are synthesised for the remaining tool calls so message history stays well-formed.
+- Has access to live workflow state across turns and can trigger workflow runs itself via `run_workflow`. The call returns immediately with `{run_id, status: "running"}`; the agent loop emits `run_started` (frontend attaches the run panel to the live WS), then blocks on `wait_for_run` for the materialised final result before letting the LLM see the tool result. On success the LLM sees only `{run_id, status, total_cost}` — outputs are deliberately not relayed (the user reads them in the run panel); on failure the prompt directs `view_run(run_id)` to fetch error details. Only one run can be in flight per workflow.
+- Per-session cancellation: a new user message supersedes the in-flight turn; an explicit `POST /api/sessions/{sid}/cancel` signals it as a clean cancel. Mid-stream cancels are detected at LLM-round, tool-call, and `wait_for_run` poll boundaries; if a tool batch was already started, cancellation results are synthesised for the remaining tool calls so message history stays well-formed. Cancelling while waiting on a run leaves the run executing in the background — the next turn can pick it up via `view_run`.
 - Hard cap of 12 LLM rounds per turn.
 
 ### 5.2 Node runtime
@@ -114,6 +116,7 @@ Tools live in a single Python registry (`app.runner.tools.REGISTRY`). Each is ca
 - SQLite for workflows, nodes, edges, sessions, messages, runs, node runs, settings (legacy). Default DB at `./workflow_builder.db`.
 - Filesystem for per-run workdirs (`tempfile.mkdtemp(prefix="wfrun-")`).
 - Listing surfaces the most recent 20 runs per workflow. **Automatic pruning of older runs is not yet implemented** — older rows accumulate in the DB.
+- Each `Run` row carries a `workflow_snapshot` JSON column — the frozen graph (nodes + code + edges + in/out node ids) the runner actually executed. Runs created before the column landed have `null`; new runs always populate it. The runner uses the snapshot, not a re-read of the live workflow, so the row can't drift from what was executed. `POST /api/runs/{rid}/rerun` re-executes a snapshot with fresh inputs without restoring the live graph.
 - Tiny ad-hoc column-add migrations live in `app.db._PENDING_COLUMNS` (idempotent against `PRAGMA table_info`); SQLAlchemy's `create_all` only adds tables.
 
 ## 6. Non-Functional
@@ -147,9 +150,11 @@ Message    { id, session_id, role, content, tool_calls,
            # must be echoed back unmodified on the next turn
 
 Run        { id, workflow_id, kind, status, inputs, outputs, error,
-             started_at, ended_at, total_cost }
-           # kind: "user" | "test"  (only "user" reachable in v1)
+             started_at, ended_at, total_cost,
+             workflow_snapshot: { nodes[], edges[], input_node_id, output_node_id }? }
+           # kind: "user" | "test"
            # status: "pending" | "running" | "success" | "error" | "cancelled"
+           # workflow_snapshot: frozen at run creation; null on legacy rows
 
 NodeRun    { id, run_id, node_id, status, inputs, outputs,
              logs, llm_calls, tool_calls, error, duration_ms, cost }
@@ -163,6 +168,7 @@ Setting    { key, value }   # legacy / fallback only — see §5.5
 # read-only inspection (always allowed, even mid-run)
 view_graph()                           -> {workflow_id, name, input_node_id, output_node_id, nodes[], edges[]}
 view_node_details(node_id)             -> {full node record incl. code, user_edited, position}
+view_run(run_id)                       -> {run_id, status, outputs, node_errors, error, total_cost}
 
 # graph mutation (blocked while a workflow run is in progress)
 add_node(name, description, code, inputs, outputs, model) -> {node_id, node}
@@ -173,9 +179,13 @@ add_edge(from_node_id, from_output, to_node_id, to_input) -> {edge_id, edge}
 remove_edge(edge_id)
 set_input_node(node_id)
 set_output_node(node_id)
+clean_canvas()                         # wipe nodes + edges + in/out pointers; preserve session/runs/history
+
+# run trigger (blocks until run finishes; refuses if another run is in flight)
+run_workflow(inputs)                   -> {run_id, status, total_cost}   # outputs deliberately not relayed
 ```
 
-The orchestrator does **not** have tools to run the workflow itself, fetch run results, or generate test data in v1. Those (`run_workflow`, `get_run`, `generate_test_data`) are on the roadmap (§10) and would unlock a self-driving test-run loop.
+`run_workflow` returns lean state — the user sees outputs in the run panel; the orchestrator should not summarise them on success. `view_run` is reserved for failure diagnosis, reading a research-node's output back into design, and stage handoffs in multi-workflow solves. `clean_canvas` is the seam between stages, not a redo button. The `generate_test_data` tool (for synthesising input fixtures) remains on the roadmap (§10).
 
 When the user has edited a node, its `user_edited` flag is `true` in the per-turn graph-state injection. The system prompt directs the orchestrator to `view_node_details` first and patch surgically rather than overwriting, unless the user explicitly asks for a rewrite.
 
@@ -196,14 +206,14 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 - Sandboxed Python execution (trusted local only)
 
 **On the roadmap, partially or wholly unimplemented:**
-- **Orchestrator-driven test runs.** `run_workflow`, `get_run`, and `generate_test_data` tools so the orchestrator can run, inspect logs/errors, and self-debug between turns. The data model already carries `Run.kind = "test"` to distinguish them.
+- **Orchestrator test-data generation.** `run_workflow` and `view_run` ship; `generate_test_data` (synthesise plausible inputs for an input node so the orchestrator can self-debug without the user supplying fixtures) is still unbuilt. `Run.kind = "test"` exists in the data model to distinguish such runs from user runs.
 - **Generative UI (designer agent).** A second LLM agent — the **designer** — that emits a single self-contained HTML/CSS/JS page tailored to the workflow's input/output shape, so the workflow can be invoked from a purpose-built UI rather than the generic textarea form. Invocation paths: (a) the orchestrator calls the designer as a tool when it judges the workflow stable enough to "ship a UI for"; (b) a dedicated **Design** tab in the app where the user asks the designer directly. Output is a single HTML document (inline CSS/JS, no build step) that posts to the workflow's run endpoint and renders results — dynamic per task: a chat box for a Q&A workflow, a form + table for a data-extraction workflow, a file dropzone for a doc-processing workflow, etc. Stored alongside the workflow; regeneratable. Open questions: where the page is hosted (served from the backend at `/w/{workflow_id}` vs. exported as a standalone file), how it authenticates to the run endpoint in the local-only model, and how it handles streaming run events.
 - **File-typed inputs.** Run panel currently exposes textareas only; file upload for file-typed input ports isn't built.
 - **Run pruning.** Older runs aren't auto-deleted once a workflow exceeds 20.
 - **Single-process packaging.** The PRD's original ambition of one `pip`-installed package serving both API and built frontend on a single port — the current dev setup runs them separately.
 
 ## 11. Risks
-- **Orchestrator quality is the product.** If it can't write decent Python or recover from failures, the UX is dead. Without test-run feedback (§10), today the orchestrator builds blind — strong system prompt and careful tool design carry the load.
+- **Orchestrator quality is the product.** If it can't write decent Python or recover from failures, the UX is dead. With `run_workflow` + `view_run` the orchestrator can now execute and inspect its own builds (and is prompted to do so on failure paths and after running research nodes); the remaining gap is `generate_test_data`, so it still depends on user-supplied inputs to drive a run.
 - **Shell tool is dangerous.** Trusted-local mitigates; the UI flags it as dangerous in node config.
 - **OpenRouter cost surprises.** Cost is shown per run; long-term consider per-run caps.
 - **Subprocess + streaming plumbing for live runs** is the trickiest engineering bit — node logs, LLM-call markers, and tool-call markers must flow from a child process through a thread-safe in-memory pub/sub to a WebSocket without buffering badly.
@@ -215,6 +225,6 @@ When the user has edited a node, its `user_edited` flag is `true` in the per-tur
 3. **Manual builder UI** ✅ canvas, Monaco code editor per node, port editor, model + tool config, run panel with input form and per-node trace.
 4. **Live run streaming** ✅ WebSocket pub/sub, per-node states on canvas, cancellation.
 5. **Orchestrator v1** ✅ chat session, SSE streaming with extended thinking, graph-mutation tool surface, `user_edited` awareness, mid-turn cancellation/supersession.
-6. **Orchestrator test-run loop** ⏳ `run_workflow` / `get_run` / `generate_test_data` so the orchestrator can run, inspect, and fix without the user in the loop.
+6. **Orchestrator-driven runs** 🟡 `run_workflow` triggers runs from chat (agent loop attaches the run panel and waits), `view_run` inspects results, `clean_canvas` enables multi-stage solves; runs carry a frozen `workflow_snapshot` and old snapshots are re-runnable. Remaining: `generate_test_data` so the orchestrator can self-debug without user-supplied fixtures.
 7. **Generative UI / designer agent** ⏳ second agent that emits a workflow-specific HTML page; invokable as an orchestrator tool and from a dedicated Design tab.
 8. **Polish** ⏳ file-typed inputs, run pruning, single-package packaging.

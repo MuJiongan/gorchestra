@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from './components/TopBar';
 import { Canvas } from './components/Canvas';
 import { ChatPanel, type ChatMessage, type AssistantMessage, type ChatBlock } from './components/ChatPanel';
 import { NodePanel } from './components/NodePanel';
 import { RunPanel } from './components/RunPanel';
+import { PortRow } from './components/ValueViewer';
 import { SettingsPanel } from './components/Settings';
 import { api } from './api';
 import { loadSettings, SETTINGS_CHANGED_EVENT } from './localSettings';
+import { ensureNotificationPermission, notifyRunFinished } from './notify';
 import type {
-  Workflow, WorkflowDetail, CurrentRun, RunEvent, NodeRunStatus,
-  OrchestratorEvent, ChatHistoryMessage,
+  Workflow, WorkflowDetail, CurrentRun, RunEvent, RunStatus, NodeRunStatus,
+  OrchestratorEvent, ChatHistoryMessage, Run,
 } from './types';
 
 type View = 'workflow' | 'settings';
@@ -27,7 +29,41 @@ const GRAPH_MUTATING_TOOLS = new Set([
   'remove_edge',
   'set_input_node',
   'set_output_node',
+  'clean_canvas',
 ]);
+
+/** Coerce a Run's `workflow_snapshot` into a WorkflowDetail so the Canvas can
+ * render it the same way it renders the live graph. The snapshot omits the
+ * Workflow's user-visible `name` field; we synthesise one from the run id. */
+function snapshotToDetail(run: Run): WorkflowDetail | null {
+  const s = run.workflow_snapshot;
+  if (!s) return null;
+  return {
+    id: s.id,
+    name: `run ${run.id.slice(0, 8)}`,
+    input_node_id: s.input_node_id,
+    output_node_id: s.output_node_id,
+    nodes: s.nodes.map((n) => ({
+      id: n.id,
+      workflow_id: s.id,
+      name: n.name,
+      description: n.description ?? '',
+      code: n.code,
+      inputs: n.inputs,
+      outputs: n.outputs,
+      config: n.config,
+      position: n.position ?? { x: 0, y: 0 },
+    })),
+    edges: s.edges.map((e) => ({
+      id: e.id,
+      workflow_id: s.id,
+      from_node_id: e.from_node_id,
+      from_output: e.from_output,
+      to_node_id: e.to_node_id,
+      to_input: e.to_input,
+    })),
+  };
+}
 
 function historyToChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   return history.map((m) => {
@@ -37,7 +73,13 @@ function historyToChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
       content: (m.content ?? []).map((b): ChatBlock => {
         if (b.t === 'thinking') return { t: 'thinking', text: b.text };
         if (b.t === 'p') return { t: 'p', text: b.text };
-        return { t: 'tool', tool: b.tool, args: b.args, status: b.status === 'pending' ? 'pending' : b.status };
+        return {
+          t: 'tool',
+          tool: b.tool,
+          args: b.args,
+          status: b.status === 'pending' ? 'pending' : b.status,
+          result: b.result,
+        };
       }),
     };
   });
@@ -56,7 +98,6 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [showRunPanel, setShowRunPanel] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
 
   // Mirror of `activeId` so async callbacks (SSE handlers, refreshDetail)
@@ -77,6 +118,50 @@ export default function App() {
   // Live run state (Phase 4 streaming).
   const [currentRun, setCurrentRun] = useState<CurrentRun | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // When non-null, the canvas renders this run's frozen `workflow_snapshot`
+  // instead of the live graph. NodePanel still works (read-only) so the user
+  // can drill into a snapshot node's code and that node's run trace; the
+  // live RunPanel is hidden.
+  const [viewingRun, setViewingRun] = useState<Run | null>(null);
+  // Selection is tracked separately for snapshot view so it doesn't leak
+  // into the live canvas's selection state when the user toggles back.
+  const [selectedSnapshotNodeId, setSelectedSnapshotNodeId] = useState<string | null>(null);
+  const enterSnapshotView = async (runId: string) => {
+    try {
+      const run = await api.getRun(runId);
+      if (!run.workflow_snapshot) return;
+      setViewingRun(run);
+      setSelectedSnapshotNodeId(null);
+      setSelectedNodeId(null);
+      // For runs still executing, attach to the live WS so node-state dots
+      // animate on the snapshot canvas (snapshotNodeStates prefers
+      // currentRun.nodeStates when its id matches viewingRun.id) and the
+      // node panel's trace tab streams events. For terminal runs, the
+      // historical NodeRun rows are enough — no WS needed.
+      const isRunning = run.status === 'running' || run.status === 'pending';
+      if (isRunning && (!currentRun || currentRun.id !== run.id)) {
+        // We don't know whether this run executes on live or on a divergent
+        // snapshot (the click came from the recent-runs list, which doesn't
+        // distinguish). Mark it `executesOnSnapshot` so leaving snapshot
+        // view to live doesn't overlay potentially-mismatched dots there;
+        // snapshot view itself overlays correctly via id lookup.
+        attachToRunRef.current(run.id, run.workflow_id, run.status, /* executesOnSnapshot */ true);
+      }
+    } catch {
+      /* fetch failure: leave view as-is */
+    }
+  };
+  const exitSnapshotView = () => {
+    setViewingRun(null);
+    setSelectedSnapshotNodeId(null);
+  };
+  // Switching workflows must drop snapshot view — the snapshot belongs to
+  // whatever workflow's runs the user was browsing before.
+  useEffect(() => {
+    setViewingRun(null);
+    setSelectedSnapshotNodeId(null);
+  }, [activeId]);
 
   // Mirror localStorage's orchestrator-model setting so the chat header reflects
   // what's actually being sent over the wire. Refreshed on save (custom event)
@@ -254,7 +339,7 @@ export default function App() {
           for (let i = content.length - 1; i >= 0; i--) {
             const b = content[i];
             if (b.t === 'tool' && b.tool === ev.tool && b.status === 'pending') {
-              content[i] = { ...b, status: ev.status };
+              content[i] = { ...b, status: ev.status, result: ev.result };
               break;
             }
           }
@@ -263,6 +348,12 @@ export default function App() {
         if (ev.status === 'ok' && GRAPH_MUTATING_TOOLS.has(ev.tool)) {
           refreshDetail(wid);
         }
+      } else if (ev.kind === 'run_started') {
+        // Orchestrator kicked off a run via `run_workflow`. Attach the run
+        // panel to it via the same code path the Run button uses, so the
+        // user gets live progress while the orchestrator turn awaits the
+        // result.
+        attachToRunRef.current(ev.run_id, ev.workflow_id);
       } else if (ev.kind === 'error') {
         updateAssistant((a) => ({
           ...a,
@@ -315,7 +406,6 @@ export default function App() {
       setWorkflows((prev) => (prev.find((p) => p.id === w.id) ? prev : [w, ...prev]));
       setActiveId(w.id);
       setSelectedNodeId(null);
-      setShowRunPanel(false);
     }
 
     let sid = sessionByWorkflow[wid];
@@ -351,7 +441,6 @@ export default function App() {
     setActiveId(w.id);
     setView('workflow');
     setSelectedNodeId(null);
-    setShowRunPanel(false);
     setCurrentRun(null);
     setChatByWorkflow((prev) => ({ ...prev, [w.id]: [] }));
   };
@@ -382,29 +471,50 @@ export default function App() {
     if (id === activeId) await refreshDetail();
   };
 
-  const startRun = async (inputs: Record<string, unknown>) => {
-    if (!detail) return;
-    const run = await api.startRun(detail.id, inputs);
+  /** Open the run panel and attach a WS to the given run id. Used both by
+   *  the manual Run button (after its POST resolves) and by the chat handler
+   *  when the orchestrator emits a `run_started` event for a run it kicked off. */
+  const attachToRun = (
+    runId: string,
+    workflowId: string,
+    initialStatus: RunStatus = 'running',
+    executesOnSnapshot: boolean = false,
+  ) => {
+    ensureNotificationPermission();
+    const workflowName =
+      workflows.find((w) => w.id === workflowId)?.name ?? 'workflow';
+    const startedAt = Date.now();
     setCurrentRun({
-      id: run.id,
-      workflow_id: detail.id,
-      status: run.status,
-      startedAt: Date.now(),
+      id: runId,
+      workflow_id: workflowId,
+      status: initialStatus,
+      startedAt,
       events: [],
       nodeStates: {},
       finalOutputs: null,
       error: null,
       totalCost: 0,
+      executesOnSnapshot,
     });
-    setShowRunPanel(true);
     wsRef.current?.close();
-    const ws = new WebSocket(api.runEventsUrl(run.id));
+    const ws = new WebSocket(api.runEventsUrl(runId));
     wsRef.current = ws;
     ws.onmessage = (e) => {
       let ev: RunEvent;
       try { ev = JSON.parse(e.data) as RunEvent; } catch { return; }
+      if (ev.type === 'run_finished') {
+        notifyRunFinished({
+          runId,
+          workflowName,
+          status: ev.status,
+          error: ev.error,
+          outputs: ev.outputs,
+          totalCost: ev.total_cost,
+          durationMs: Date.now() - startedAt,
+        });
+      }
       setCurrentRun((cur) => {
-        if (!cur || cur.id !== run.id) return cur;
+        if (!cur || cur.id !== runId) return cur;
         const nextStates = { ...cur.nodeStates };
         let nextStatus = cur.status;
         let finalOutputs = cur.finalOutputs;
@@ -417,6 +527,22 @@ export default function App() {
           finalOutputs = ev.outputs;
           error = ev.error;
           totalCost = ev.total_cost;
+          // Defensive sweep: if the runner ever fails to emit node_finished
+          // for a node (escaped exception, dropped event, cancel mid-flight),
+          // the dot would be stuck on running/pending forever. Once
+          // run_finished arrives the runner is done — force any non-terminal
+          // state to a sensible terminal one. "running" → "error" (the node
+          // started but never resolved); "pending" → "skipped" (never
+          // started). On a cancelled run prefer "skipped" for both — those
+          // nodes didn't fail, they just got interrupted.
+          for (const nid of Object.keys(nextStates)) {
+            const s = nextStates[nid];
+            if (s === 'running') {
+              nextStates[nid] = ev.status === 'cancelled' ? 'skipped' : 'error';
+            } else if (s === 'pending') {
+              nextStates[nid] = 'skipped';
+            }
+          }
         }
         return {
           ...cur,
@@ -432,6 +558,15 @@ export default function App() {
     ws.onerror = () => { /* keep state; close handler will fire */ };
     ws.onclose = () => { if (wsRef.current === ws) wsRef.current = null; };
   };
+
+  const startRun = async (inputs: Record<string, unknown>) => {
+    if (!detail) return;
+    const run = await api.startRun(detail.id, inputs);
+    attachToRun(run.id, detail.id, run.status);
+  };
+
+  const attachToRunRef = useRef(attachToRun);
+  useEffect(() => { attachToRunRef.current = attachToRun; });
 
   const cancelRun = async () => {
     if (!currentRun) return;
@@ -455,7 +590,19 @@ export default function App() {
         ? 'ready'
         : 'idle';
 
-  const canvasNodeStates: Record<string, NodeRunStatus> = currentRun?.nodeStates ?? {};
+  // Per-node state dots for snapshot view. When the viewed run is the
+  // currently-attached one (rerun-from-snapshot, mid-execution), use live
+  // states from the WS so the dots animate on the snapshot canvas.
+  // Otherwise use the historical NodeRun rows (frozen post-completion).
+  // The live canvas has its own overlay below — this one's just for
+  // snapshot view.
+  const snapshotNodeStates: Record<string, NodeRunStatus> = viewingRun
+    ? currentRun && currentRun.id === viewingRun.id
+      ? currentRun.nodeStates
+      : Object.fromEntries(
+          viewingRun.node_runs.map((nr) => [nr.node_id, nr.status]),
+        )
+    : {};
 
   return (
     <div
@@ -475,7 +622,6 @@ export default function App() {
           setActiveId(id);
           setView('workflow');
           setSelectedNodeId(null);
-          setShowRunPanel(false);
           setCurrentRun(null);
         }}
         onNew={handleNew}
@@ -483,7 +629,8 @@ export default function App() {
         onDelete={handleDelete}
         onOpenSettings={() => setView('settings')}
         onOpenRun={() => {
-          setShowRunPanel(true);
+          // RunPanel is the default right-side surface — "Run" in the
+          // top bar is now just a deselect shortcut so it returns to view.
           setSelectedNodeId(null);
         }}
         runDisabled={!detail}
@@ -513,20 +660,52 @@ export default function App() {
               <div
                 style={{
                   flex: 2,
-                  position: 'relative',
+                  display: 'flex',
+                  flexDirection: 'column',
                   borderRight: '1px solid var(--rule)',
                   minWidth: 0,
                 }}
               >
-                {detail ? (
+                {viewingRun && (
+                  <SnapshotBanner run={viewingRun} onExit={exitSnapshotView} />
+                )}
+                {/* Canvas (and the empty-canvas placeholder) need
+                 * `position: relative` to host React Flow's absolute layout.
+                 * Banner stacks above via flex; this wrapper takes the rest. */}
+                <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+                {viewingRun ? (
+                  // Viewing a run's frozen snapshot. Selection is enabled so
+                  // the user can drill into a node's code + run trace, but
+                  // editing is disabled (NodePanel renders read-only).
+                  (() => {
+                    const snapDetail = snapshotToDetail(viewingRun);
+                    return snapDetail ? (
+                      <Canvas
+                        detail={snapDetail}
+                        selectedNodeId={selectedSnapshotNodeId}
+                        onSelectNode={(id) => setSelectedSnapshotNodeId(id)}
+                        nodeStates={snapshotNodeStates}
+                      />
+                    ) : null;
+                  })()
+                ) : detail ? (
                   <Canvas
                     detail={detail}
                     selectedNodeId={selectedNodeId}
-                    onSelectNode={(id) => {
-                      setSelectedNodeId(id);
-                      if (id) setShowRunPanel(false);
-                    }}
-                    nodeStates={canvasNodeStates}
+                    onSelectNode={(id) => setSelectedNodeId(id)}
+                    // Overlay live node states for runs that execute on the
+                    // live graph (manual run, orchestrator-triggered run).
+                    // Skip for snapshot reruns — their snapshot can diverge
+                    // from live, so dots may apply to wrong nodes or miss
+                    // entirely. Snapshot view is the right place to watch
+                    // those; the rerun handler keeps the user there.
+                    nodeStates={
+                      currentRun &&
+                      currentRun.workflow_id === detail.id &&
+                      !currentRun.executesOnSnapshot
+                        ? currentRun.nodeStates
+                        : undefined
+                    }
                   />
                 ) : (
                   <div
@@ -552,52 +731,95 @@ export default function App() {
                     </div>
                   </div>
                 )}
+                </div>
               </div>
 
               {/* right 3/5 — node configuration / inputs / outputs */}
               <div style={{ flex: 3, position: 'relative', minWidth: 0 }}>
-                {detail && selectedNode && (
+                {viewingRun && (() => {
+                  const snapDetail = snapshotToDetail(viewingRun);
+                  const snapNode = snapDetail?.nodes.find(
+                    (n) => n.id === selectedSnapshotNodeId,
+                  );
+                  if (snapDetail && snapNode) {
+                    return (
+                      <NodePanel
+                        node={snapNode}
+                        workflow={snapDetail}
+                        onClose={() => setSelectedSnapshotNodeId(null)}
+                        onChange={() => {}}
+                        readOnly
+                        pinnedRun={viewingRun}
+                        // Pass currentRun so the trace tab streams live
+                        // events when this snapshot view is bound to an
+                        // in-flight run (rerun-from-snapshot, or recent-run
+                        // click on a running run). Without it, the trace
+                        // would fall back to viewingRun.node_runs — empty
+                        // for runs that haven't materialised yet.
+                        currentRun={currentRun}
+                        onSendErrorToOrchestrator={sendErrorToOrchestrator}
+                      />
+                    );
+                  }
+                  return (
+                    <SnapshotRunPanel
+                      run={viewingRun}
+                      onExit={exitSnapshotView}
+                      // Block rerun while any run on this workflow is in
+                      // flight — server has no guard yet, so we hold the
+                      // line in the UI to avoid stacking parallel runs.
+                      runInProgress={
+                        !!currentRun &&
+                        currentRun.workflow_id === viewingRun.workflow_id &&
+                        (currentRun.status === 'running' ||
+                          currentRun.status === 'pending')
+                      }
+                      onRerun={async (inputs) => {
+                        const newRun = await api.rerunFromSnapshot(
+                          viewingRun.id,
+                          inputs,
+                        );
+                        // The rerun executes against the snapshot's graph
+                        // (which may diverge from live), so the live canvas
+                        // can't show its progress reliably. Stay in
+                        // snapshot view — swap viewingRun to the new run
+                        // and attach the WS so node-state dots animate on
+                        // the snapshot canvas in real time. The user exits
+                        // via "← live" on the SnapshotBanner whenever
+                        // they're done watching.
+                        setViewingRun(newRun);
+                        setSelectedSnapshotNodeId(null);
+                        attachToRunRef.current(
+                          newRun.id,
+                          newRun.workflow_id,
+                          newRun.status,
+                          /* executesOnSnapshot */ true,
+                        );
+                      }}
+                    />
+                  );
+                })()}
+                {!viewingRun && detail && selectedNode && (
                   <NodePanel
                     node={selectedNode}
                     workflow={detail}
                     onClose={() => setSelectedNodeId(null)}
                     onChange={refreshDetail}
+                    currentRun={currentRun}
+                    onSendErrorToOrchestrator={sendErrorToOrchestrator}
                   />
                 )}
-                {detail && showRunPanel && (
+                {!viewingRun && detail && !selectedNode && (
                   <RunPanel
                     workflow={detail}
                     currentRun={currentRun}
                     onStart={startRun}
                     onCancel={cancelRun}
-                    onClose={() => setShowRunPanel(false)}
-                    onSendErrorToOrchestrator={sendErrorToOrchestrator}
+                    onViewRunOnCanvas={enterSnapshotView}
+                    orchestrating={isOrchestrating}
                   />
                 )}
-                {detail && !selectedNode && !showRunPanel && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      inset: 0,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 12,
-                      color: 'var(--ink-4)',
-                      padding: 24,
-                    }}
-                  >
-                    <div className="serif" style={{ fontStyle: 'italic', fontSize: 22, color: 'var(--ink-3)' }}>
-                      nothing selected.
-                    </div>
-                    <div style={{ fontSize: 13, maxWidth: 420, textAlign: 'center', lineHeight: 1.6 }}>
-                      click a node in the canvas to see its specification, or press{' '}
-                      <span className="italic-em">run</span> to provide inputs and view outputs.
-                    </div>
-                  </div>
-                )}
-                {!detail && (
+                {!viewingRun && !detail && (
                   <div
                     style={{
                       position: 'absolute',
@@ -710,6 +932,9 @@ export default function App() {
                     sessionTitle={activeWorkflow?.name}
                     modelLabel={orchestratorModel}
                     onClose={() => setChatOpen(false)}
+                    onViewRun={(runId) => {
+                      void enterSnapshotView(runId);
+                    }}
                   />
                 </div>
               </div>
@@ -717,6 +942,483 @@ export default function App() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot view — when the user clicks "view this run" (from the chat card or
+// the run-history list), the canvas swaps to render the run's frozen
+// `workflow_snapshot`. The banner keeps the read-only state visible at all
+// times; the right-side panel summarises the run and offers a way back.
+// ---------------------------------------------------------------------------
+
+function SnapshotBanner({ run, onExit }: { run: Run; onExit: () => void }) {
+  const statusColor =
+    run.status === 'success'
+      ? 'var(--state-ok)'
+      : run.status === 'error'
+        ? 'var(--state-err)'
+        : 'var(--ink-4)';
+  const statusGlyph =
+    run.status === 'success' ? '✓' : run.status === 'error' ? '×' : '·';
+  return (
+    <div
+      style={{
+        padding: '6px 12px',
+        background: 'var(--paper-2)',
+        borderBottom: '1px solid var(--rule)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 11.5,
+        minWidth: 0,
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'baseline',
+          gap: 6,
+          minWidth: 0,
+          overflow: 'hidden',
+        }}
+      >
+        <span style={{ color: statusColor, fontSize: 10 }}>{statusGlyph}</span>
+        <span
+          className="serif"
+          style={{
+            fontStyle: 'italic',
+            color: 'var(--ink-3)',
+            fontSize: 12,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          snapshot
+        </span>
+        <span
+          className="mono"
+          style={{
+            color: 'var(--ink-4)',
+            fontSize: 10.5,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {run.id.slice(0, 8)}
+        </span>
+      </span>
+      <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        onClick={onExit}
+        style={{
+          background: 'transparent',
+          border: 0,
+          padding: '2px 0',
+          cursor: 'pointer',
+          color: 'var(--accent-ink)',
+          fontSize: 11.5,
+          fontFamily: 'var(--serif)',
+          fontStyle: 'italic',
+          whiteSpace: 'nowrap',
+        }}
+        title="return to the live, editable canvas"
+      >
+        ← live
+      </button>
+    </div>
+  );
+}
+
+function SnapshotRunPanel({
+  run,
+  onExit,
+  onRerun,
+  runInProgress,
+}: {
+  run: Run;
+  onExit: () => void;
+  onRerun: (inputs: Record<string, unknown>) => Promise<void>;
+  /** True when another run on this workflow is still executing. The UI
+   * blocks rerun in that case so we don't stack parallel runs against
+   * one workflow. */
+  runInProgress?: boolean;
+}) {
+  const errored = run.node_runs.filter((nr) => nr.status === 'error');
+  const inputs = Object.entries(run.inputs ?? {});
+  const outputs = Object.entries(run.outputs ?? {});
+
+  // Re-run form state. The snapshot's input node defines the port shape;
+  // we pre-fill each field with the prior run's value (JSON-stringified)
+  // so the user can tweak just one knob and rerun.
+  const inputPorts = (() => {
+    const snap = run.workflow_snapshot;
+    if (!snap) return [];
+    const inputNode = snap.nodes.find((n) => n.id === snap.input_node_id);
+    return inputNode?.inputs ?? [];
+  })();
+  const initialFormValues = useMemo<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const p of inputPorts) {
+      const prior = (run.inputs ?? {})[p.name];
+      out[p.name] = prior === undefined || prior === null
+        ? ''
+        : typeof prior === 'string'
+          ? prior
+          : JSON.stringify(prior);
+    }
+    return out;
+  }, [run.id, inputPorts]);
+  const [formOpen, setFormOpen] = useState(false);
+  const [formValues, setFormValues] = useState<Record<string, string>>(initialFormValues);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  useEffect(() => {
+    setFormOpen(false);
+    setFormValues(initialFormValues);
+    setSubmitError(null);
+  }, [run.id, initialFormValues]);
+
+  const submitRerun = async () => {
+    const parsed: Record<string, unknown> = {};
+    for (const p of inputPorts) {
+      const raw = formValues[p.name];
+      if (raw === undefined || raw === '') {
+        parsed[p.name] = null;
+        continue;
+      }
+      try { parsed[p.name] = JSON.parse(raw); } catch { parsed[p.name] = raw; }
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onRerun(parsed);
+    } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : String(e));
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        padding: '20px 24px',
+        overflow: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 14,
+      }}
+    >
+      <div>
+        <div className="smallcaps" style={{ color: 'var(--ink-3)', marginBottom: 4 }}>
+          run details
+        </div>
+        <div
+          className="serif"
+          style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--ink)' }}
+        >
+          run {run.id.slice(0, 8)}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'auto 1fr',
+          columnGap: 14,
+          rowGap: 4,
+          fontSize: 12,
+        }}
+      >
+        <span className="smallcaps" style={{ color: 'var(--ink-4)' }}>status</span>
+        <span className="mono" style={{ fontSize: 11 }}>
+          {run.status}
+        </span>
+        <span className="smallcaps" style={{ color: 'var(--ink-4)' }}>cost</span>
+        <span className="mono" style={{ fontSize: 11 }}>
+          ${(run.total_cost ?? 0).toFixed(4)}
+        </span>
+        <span className="smallcaps" style={{ color: 'var(--ink-4)' }}>nodes</span>
+        <span className="mono" style={{ fontSize: 11 }}>
+          {run.workflow_snapshot?.nodes.length ?? 0} ·{' '}
+          {run.node_runs.filter((n) => n.status === 'success').length} ok ·{' '}
+          {errored.length} err
+        </span>
+      </div>
+
+      {errored.length > 0 && (
+        <div>
+          <div className="smallcaps" style={{ color: 'var(--ink-3)', marginBottom: 6 }}>
+            errors
+          </div>
+          {errored.map((nr) => {
+            const nodeName =
+              run.workflow_snapshot?.nodes.find((n) => n.id === nr.node_id)?.name ??
+              nr.node_id;
+            return (
+              <div
+                key={nr.id}
+                style={{
+                  background: 'rgba(180, 60, 60, 0.06)',
+                  borderLeft: '2px solid var(--state-err)',
+                  padding: '6px 10px',
+                  marginBottom: 6,
+                  fontSize: 12,
+                }}
+              >
+                <div className="mono" style={{ color: 'var(--state-err)' }}>
+                  {nodeName}
+                </div>
+                <div
+                  className="serif"
+                  style={{ fontStyle: 'italic', color: 'var(--ink-2)' }}
+                >
+                  {nr.error}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* rerun affordance — visible whenever the snapshot is runnable
+          (has a designated input node). When the input node has no input
+          ports, the form skips field rendering and just confirms execute. */}
+      {run.workflow_snapshot?.input_node_id && !formOpen && (
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => setFormOpen(true)}
+            disabled={!!runInProgress}
+            className="smallcaps"
+            style={{
+              background: 'transparent',
+              border: '1px solid var(--rule)',
+              padding: '6px 12px',
+              cursor: runInProgress ? 'not-allowed' : 'pointer',
+              color: runInProgress ? 'var(--ink-4)' : 'var(--accent-ink)',
+              fontSize: 10,
+              fontFamily: 'var(--serif)',
+              fontStyle: 'italic',
+              textTransform: 'none',
+              letterSpacing: 0,
+              opacity: runInProgress ? 0.6 : 1,
+            }}
+            title={
+              runInProgress
+                ? 'a run is already in progress on this workflow — wait for it to finish'
+                : inputPorts.length > 0
+                  ? 'run this exact graph again with edited inputs'
+                  : 'run this exact graph again'
+            }
+          >
+            {inputPorts.length > 0 ? 'rerun with new inputs →' : 'rerun →'}
+          </button>
+          {runInProgress && (
+            <span
+              className="serif"
+              style={{ fontStyle: 'italic', color: 'var(--ink-4)', fontSize: 11.5 }}
+            >
+              a run is already in flight
+            </span>
+          )}
+        </div>
+      )}
+
+      {formOpen && (
+        <div
+          style={{
+            border: '1px solid var(--rule)',
+            background: 'var(--paper-2)',
+            padding: '12px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 8,
+            }}
+          >
+            <span className="smallcaps" style={{ color: 'var(--ink-3)' }}>
+              {inputPorts.length > 0 ? 'new inputs' : 'rerun'}
+            </span>
+            <span
+              className="serif"
+              style={{ fontStyle: 'italic', color: 'var(--ink-4)', fontSize: 11.5 }}
+            >
+              · runs the snapshot, not the live graph
+            </span>
+          </div>
+          {inputPorts.length === 0 && (
+            <div
+              className="serif"
+              style={{ fontStyle: 'italic', color: 'var(--ink-4)', fontSize: 12 }}
+            >
+              this workflow takes no inputs.
+            </div>
+          )}
+          {inputPorts.map((p) => (
+            <label
+              key={p.name}
+              style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+            >
+              <span
+                className="mono"
+                style={{ fontSize: 10.5, color: 'var(--ink-3)' }}
+              >
+                {p.name}
+                {p.type_hint && p.type_hint !== 'any' && (
+                  <span style={{ color: 'var(--ink-4)' }}>
+                    {' · '}
+                    {p.type_hint}
+                  </span>
+                )}
+                {p.required && (
+                  <span style={{ color: 'var(--accent-ink)', marginLeft: 6 }}>·</span>
+                )}
+              </span>
+              <textarea
+                value={formValues[p.name] ?? ''}
+                onChange={(e) =>
+                  setFormValues((prev) => ({ ...prev, [p.name]: e.target.value }))
+                }
+                rows={1}
+                className="mono"
+                style={{
+                  fontSize: 11.5,
+                  fontFamily: 'var(--mono)',
+                  background: 'var(--paper)',
+                  border: '1px solid var(--rule)',
+                  padding: '6px 8px',
+                  resize: 'vertical',
+                  minHeight: 28,
+                  color: 'var(--ink)',
+                }}
+                disabled={submitting}
+              />
+            </label>
+          ))}
+          {submitError && (
+            <div
+              className="serif"
+              style={{
+                fontStyle: 'italic',
+                color: 'var(--state-err)',
+                fontSize: 11.5,
+              }}
+            >
+              {submitError}
+            </div>
+          )}
+          {runInProgress && (
+            <div
+              className="serif"
+              style={{
+                fontStyle: 'italic',
+                color: 'var(--state-err)',
+                fontSize: 11.5,
+              }}
+            >
+              another run is in flight on this workflow — wait for it to finish.
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              onClick={submitRerun}
+              disabled={submitting || !!runInProgress}
+              className="ed-btn ed-btn--primary"
+              style={{ fontSize: 11 }}
+              title={
+                runInProgress
+                  ? 'a run is already in progress on this workflow'
+                  : undefined
+              }
+            >
+              {submitting ? 'starting…' : 'execute'}{' '}
+              <span className="ed-btn__mark">→</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFormOpen(false);
+                setFormValues(initialFormValues);
+                setSubmitError(null);
+              }}
+              disabled={submitting}
+              className="ed-btn"
+              style={{ fontSize: 11 }}
+            >
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {inputs.length > 0 && (
+        <div>
+          <div className="smallcaps" style={{ color: 'var(--ink-3)', marginBottom: 6 }}>
+            inputs
+          </div>
+          {inputs.map(([k, v]) => (
+            <PortRow
+              key={k}
+              name={k}
+              value={v}
+              viewerTitle={`run ${run.id.slice(0, 8)} · ${k}`}
+              viewerSubtitle="input"
+            />
+          ))}
+        </div>
+      )}
+
+      {outputs.length > 0 && (
+        <div>
+          <div className="smallcaps" style={{ color: 'var(--ink-3)', marginBottom: 6 }}>
+            outputs
+          </div>
+          {outputs.map(([k, v]) => (
+            <PortRow
+              key={k}
+              name={k}
+              value={v}
+              viewerTitle={`run ${run.id.slice(0, 8)} · ${k}`}
+              viewerSubtitle="output"
+            />
+          ))}
+        </div>
+      )}
+
+      <span style={{ flex: 1 }} />
+
+      <button
+        type="button"
+        onClick={onExit}
+        className="smallcaps"
+        style={{
+          alignSelf: 'flex-start',
+          background: 'transparent',
+          border: '1px solid var(--rule)',
+          padding: '6px 12px',
+          cursor: 'pointer',
+          color: 'var(--accent-ink)',
+          fontSize: 10,
+          fontFamily: 'var(--serif)',
+          fontStyle: 'italic',
+          textTransform: 'none',
+          letterSpacing: 0,
+        }}
+      >
+        ← back to live
+      </button>
     </div>
   );
 }

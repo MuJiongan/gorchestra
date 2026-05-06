@@ -24,6 +24,7 @@ def get_db():
 _PENDING_COLUMNS: list[tuple[str, str, str]] = [
     # (table, column, type with default)
     ("messages", "reasoning_details", "JSON DEFAULT '[]'"),
+    ("runs", "workflow_snapshot", "JSON DEFAULT NULL"),
 ]
 
 

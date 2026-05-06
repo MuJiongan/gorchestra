@@ -1,26 +1,30 @@
 import { useEffect, useMemo, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import type { WFNode, IOPort, WorkflowDetail, Run, NodeRun, NodeRunStatus } from '../types';
+import type { WFNode, IOPort, WorkflowDetail, Run, CurrentRun } from '../types';
 import { api } from '../api';
-import { NodeIOBlock } from './NodeIOBlock';
-import { ValueRow } from './ValueViewer';
-
-const NODE_RUN_STATE_CLASS: Record<NodeRunStatus, string> = {
-  pending: 'idle',
-  running: 'running',
-  success: 'success',
-  error: 'error',
-  skipped: 'skipped',
-};
+import {
+  NodeTraceCard, aggregateEvents, nodeRunToTrace, type NodeTrace,
+} from './NodeTraceCard';
 
 interface Props {
   node: WFNode;
   workflow: WorkflowDetail;
   onClose: () => void;
   onChange: () => void;
+  /** Render as read-only — used when inspecting a snapshot. Hides the save
+   * button and locks the editor. */
+  readOnly?: boolean;
+  /** When set, the trace tab is bound to this single historical run. The
+   * snapshot view passes the run that produced the snapshot. */
+  pinnedRun?: Run;
+  /** Live in-flight run on this workflow. When present (and `pinnedRun` is
+   * not), the trace tab streams events for `node.id` from the run's WS. */
+  currentRun?: CurrentRun | null;
+  /** Forward a node-level error from the trace tab to the orchestrator. */
+  onSendErrorToOrchestrator?: (message: string) => void;
 }
 
-type Tab = 'code' | 'i/o' | 'last run';
+type Tab = 'code' | 'i/o' | 'trace';
 
 const PANEL_STYLE: React.CSSProperties = {
   position: 'absolute',
@@ -46,7 +50,38 @@ const PANEL_STYLE: React.CSSProperties = {
  * Saves set `mark_user_edited` so the orchestrator's next pass can preserve
  * user intent (per PRD §4.4).
  */
-export function NodePanel({ node, workflow, onClose, onChange }: Props) {
+export function NodePanel({
+  node, workflow, onClose, onChange, readOnly, pinnedRun, currentRun,
+  onSendErrorToOrchestrator,
+}: Props) {
+  // Trace tab visibility + data source. Three regimes, in priority order:
+  //   1. The pinned run is also the live attached one (rerun-from-snapshot
+  //      mid-execution, viewed from snapshot view). Stream live events —
+  //      the historical NodeRun rows aren't materialised yet.
+  //   2. Pinned run only (snapshot view, post-completion). Read the
+  //      historical NodeRun for this node from the frozen Run row.
+  //   3. Live attached run on this workflow (no pin). Stream live events.
+  const liveRunForThisNode =
+    currentRun &&
+    currentRun.workflow_id === workflow.id &&
+    (!pinnedRun || currentRun.id === pinnedRun.id)
+      ? currentRun
+      : null;
+
+  const trace: NodeTrace | null = useMemo(() => {
+    if (liveRunForThisNode) {
+      const all = aggregateEvents(liveRunForThisNode.events);
+      return all.find((t) => t.node_id === node.id) ?? null;
+    }
+    if (pinnedRun) {
+      const nr = pinnedRun.node_runs.find((x) => x.node_id === node.id);
+      return nr ? nodeRunToTrace(nr) : null;
+    }
+    return null;
+  }, [liveRunForThisNode?.events, pinnedRun, node.id]);
+
+  const traceTabAvailable = !!pinnedRun || !!liveRunForThisNode;
+
   const [tab, setTab] = useState<Tab>('code');
   const [code, setCode] = useState(node.code);
   const [dirty, setDirty] = useState(false);
@@ -56,6 +91,12 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
     setDirty(false);
     setTab('code');
   }, [node.id]);
+
+  // If the trace tab disappears (run was cleared, snapshot exited) while it
+  // was selected, fall back to code so we don't render an empty pane.
+  useEffect(() => {
+    if (tab === 'trace' && !traceTabAvailable) setTab('code');
+  }, [tab, traceTabAvailable]);
 
   const isInput = workflow.input_node_id === node.id;
   const isOutput = workflow.output_node_id === node.id;
@@ -76,7 +117,7 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="smallcaps">node</span>
           <span style={{ flex: 1 }} />
-          {dirty && (
+          {dirty && !readOnly && (
             <button className="btn-ink" style={{ padding: '5px 12px', fontSize: 11 }} onClick={save}>
               save
             </button>
@@ -126,7 +167,14 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
       </div>
 
       <div style={{ display: 'flex', borderBottom: '1px solid var(--rule)', padding: '0 18px' }}>
-        {(['code', 'i/o', 'last run'] as const).map((k) => (
+        {/* `trace` shows when this node is part of a run we can read — a
+         * frozen snapshot (pinnedRun) or a live in-flight run on this
+         * workflow. Otherwise it'd just render an empty pane, so we hide
+         * the button. */}
+        {(traceTabAvailable
+          ? (['code', 'i/o', 'trace'] as const)
+          : (['code', 'i/o'] as const)
+        ).map((k) => (
           <button
             key={k}
             onClick={() => setTab(k)}
@@ -157,13 +205,18 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
               theme="vs-dark"
               language="python"
               value={code}
-              onChange={(v) => { setCode(v ?? ''); setDirty(true); }}
+              onChange={(v) => {
+                if (readOnly) return;
+                setCode(v ?? '');
+                setDirty(true);
+              }}
               options={{
                 minimap: { enabled: false },
                 fontSize: 12,
                 fontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace",
                 scrollBeyondLastLine: false,
                 lineNumbers: 'off',
+                readOnly: !!readOnly,
               }}
             />
           </div>
@@ -212,7 +265,27 @@ export function NodePanel({ node, workflow, onClose, onChange }: Props) {
           </div>
         )}
 
-        {tab === 'last run' && <LastRunsTab nodeId={node.id} workflow={workflow} />}
+        {tab === 'trace' && (
+          <div style={{ padding: 18 }}>
+            {trace ? (
+              <NodeTraceCard
+                workflow={workflow}
+                trace={trace}
+                runId={pinnedRun?.id ?? liveRunForThisNode?.id}
+                onSendErrorToOrchestrator={onSendErrorToOrchestrator}
+              />
+            ) : (
+              <div
+                className="serif"
+                style={{ fontStyle: 'italic', color: 'var(--ink-3)', fontSize: 13, lineHeight: 1.55 }}
+              >
+                {liveRunForThisNode
+                  ? 'waiting for this node to start…'
+                  : 'this node has no trace in the selected run.'}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -273,273 +346,6 @@ function PortRow({
         >
           {port.required ? 'required' : 'optional'}
         </span>
-      )}
-    </div>
-  );
-}
-
-interface NodeRunEntry {
-  run: Run;
-  nodeRun: NodeRun;
-}
-
-function LastRunsTab({ nodeId, workflow }: { nodeId: string; workflow: WorkflowDetail }) {
-  const workflowId = workflow.id;
-  const [runs, setRuns] = useState<Run[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [openRunId, setOpenRunId] = useState<string | null>(null);
-  // Tracks whether we've already auto-opened the most-recent run for this
-  // node selection. Without this, an effect that auto-opens whenever
-  // `openRunId === null` would immediately re-open a run the user just
-  // collapsed, making the row feel uncloseable.
-  const [autoOpened, setAutoOpened] = useState(false);
-
-  const refresh = async () => {
-    try {
-      const list = await api.listRuns(workflowId);
-      setRuns(list);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  useEffect(() => {
-    setRuns(null);
-    setOpenRunId(null);
-    setAutoOpened(false);
-    refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeId, workflowId]);
-
-  // Filter to runs that actually touched this node, most recent first (the
-  // listRuns endpoint already orders by started_at desc).
-  const entries: NodeRunEntry[] = useMemo(() => {
-    if (!runs) return [];
-    const out: NodeRunEntry[] = [];
-    for (const r of runs) {
-      const nr = r.node_runs.find((x) => x.node_id === nodeId);
-      if (nr) out.push({ run: r, nodeRun: nr });
-    }
-    return out;
-  }, [runs, nodeId]);
-
-  // Auto-open the most recent entry once, on first load. After that the
-  // user owns the open/closed state — collapsing a row stays collapsed.
-  useEffect(() => {
-    if (!autoOpened && entries.length > 0) {
-      setOpenRunId(entries[0].run.id);
-      setAutoOpened(true);
-    }
-  }, [entries, autoOpened]);
-
-  if (runs === null && !error) {
-    return (
-      <div
-        className="serif"
-        style={{ padding: 22, fontStyle: 'italic', color: 'var(--ink-4)', fontSize: 13 }}
-      >
-        loading…
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: 22 }}>
-        <div className="smallcaps" style={{ color: 'var(--state-err)', marginBottom: 6 }}>
-          × failed to load runs
-        </div>
-        <pre className="mono" style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: 0 }}>
-          {error}
-        </pre>
-        <button onClick={refresh} className="btn-ghost" style={{ marginTop: 12, padding: '4px 10px', fontSize: 11 }}>
-          retry
-        </button>
-      </div>
-    );
-  }
-
-  if (entries.length === 0) {
-    return (
-      <div
-        className="serif"
-        style={{ padding: 22, fontStyle: 'italic', color: 'var(--ink-3)', fontSize: 13, lineHeight: 1.55 }}
-      >
-        no runs yet for this node. run the workflow and the per-node trace will land here.
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ padding: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 10 }}>
-        <span className="smallcaps">runs</span>
-        <span
-          className="serif"
-          style={{
-            fontStyle: 'italic',
-            fontSize: 12,
-            color: 'var(--ink-4)',
-            marginLeft: 8,
-          }}
-        >
-          {entries.length} {entries.length === 1 ? 'pass' : 'passes'} · most recent first
-        </span>
-        <span style={{ flex: 1 }} />
-        <button
-          onClick={refresh}
-          className="btn-ghost"
-          style={{ padding: '3px 9px', fontSize: 11 }}
-          title="refetch runs"
-        >
-          refresh
-        </button>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {entries.map(({ run, nodeRun }) => (
-          <NodeRunCard
-            key={run.id}
-            workflow={workflow}
-            run={run}
-            nodeRun={nodeRun}
-            open={openRunId === run.id}
-            onToggle={() =>
-              setOpenRunId((cur) => (cur === run.id ? null : run.id))
-            }
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function NodeRunCard({
-  workflow,
-  run,
-  nodeRun,
-  open,
-  onToggle,
-}: {
-  workflow: WorkflowDetail;
-  run: Run;
-  nodeRun: NodeRun;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const nodeName =
-    workflow.nodes.find((n) => n.id === nodeRun.node_id)?.name ?? nodeRun.node_id;
-  return (
-    <div
-      style={{
-        border: '1px solid var(--rule)',
-        borderRadius: 3,
-        background: 'var(--paper)',
-      }}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        style={{
-          width: '100%',
-          padding: '8px 12px',
-          background: 'transparent',
-          border: 0,
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 8,
-          cursor: 'pointer',
-          textAlign: 'left',
-          color: 'var(--ink-2)',
-        }}
-      >
-        <span className={`node-state-dot ${NODE_RUN_STATE_CLASS[nodeRun.status]}`} />
-        <span className="mono" style={{ fontSize: 11, color: 'var(--ink)' }}>
-          {run.id.slice(0, 8)}
-        </span>
-        <span
-          className="serif"
-          style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)' }}
-        >
-          {run.kind}
-        </span>
-        <span style={{ flex: 1 }} />
-        <span
-          className="smallcaps"
-          style={{
-            fontSize: 9,
-            color:
-              nodeRun.status === 'success'
-                ? 'var(--state-ok)'
-                : nodeRun.status === 'error'
-                  ? 'var(--state-err)'
-                  : nodeRun.status === 'skipped'
-                    ? 'var(--ink-4)'
-                    : 'var(--ink-3)',
-          }}
-        >
-          {nodeRun.status}
-          {typeof nodeRun.duration_ms === 'number' ? ` · ${nodeRun.duration_ms}ms` : ''}
-          {typeof nodeRun.cost === 'number' && nodeRun.cost > 0
-            ? ` · $${nodeRun.cost.toFixed(4)}`
-            : ''}
-        </span>
-        <span style={{ fontFamily: 'var(--serif)', fontStyle: 'italic', color: 'var(--ink-4)' }}>
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
-
-      {open && (
-        <div
-          className="fade-in"
-          style={{
-            padding: '8px 12px 12px',
-            borderTop: '1px solid var(--rule-2)',
-          }}
-        >
-          {nodeRun.error && (
-            <pre
-              className="mono"
-              style={{
-                fontSize: 11,
-                color: 'var(--state-err)',
-                whiteSpace: 'pre-wrap',
-                margin: '0 0 8px',
-              }}
-            >
-              {nodeRun.error}
-            </pre>
-          )}
-          <NodeIOBlock
-            workflow={workflow}
-            nodeId={nodeRun.node_id}
-            nodeName={nodeName}
-            inputs={nodeRun.inputs}
-            outputs={nodeRun.outputs}
-            logs={nodeRun.logs.length ? nodeRun.logs : undefined}
-          />
-          {nodeRun.llm_calls.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              <div className="smallcaps" style={{ marginBottom: 4 }}>llm calls</div>
-              <ValueRow
-                label={`${nodeRun.llm_calls.length} ${nodeRun.llm_calls.length === 1 ? 'call' : 'calls'}`}
-                value={nodeRun.llm_calls}
-                viewerTitle={`${nodeName} · llm calls`}
-              />
-            </div>
-          )}
-          {nodeRun.tool_calls.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              <div className="smallcaps" style={{ marginBottom: 4 }}>tool calls</div>
-              <ValueRow
-                label={`${nodeRun.tool_calls.length} ${nodeRun.tool_calls.length === 1 ? 'call' : 'calls'}`}
-                value={nodeRun.tool_calls}
-                viewerTitle={`${nodeName} · tool calls`}
-              />
-            </div>
-          )}
-        </div>
       )}
     </div>
   );

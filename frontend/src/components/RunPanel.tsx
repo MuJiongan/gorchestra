@@ -3,7 +3,6 @@ import type {
   WorkflowDetail, Run, IOPort, CurrentRun,
 } from '../types';
 import { api } from '../api';
-import { PortRow } from './ValueViewer';
 
 interface Props {
   workflow: WorkflowDetail;
@@ -13,7 +12,6 @@ interface Props {
   /** Optional close handler. When omitted, the panel is treated as the
    * always-on default surface and the close button is hidden. */
   onClose?: () => void;
-  onSendErrorToOrchestrator: (message: string) => void;
   /** When set, the history list shows a "view on canvas" affordance per run.
    * The host (App) handles fetching the snapshot and swapping the canvas. */
   onViewRunOnCanvas?: (runId: string) => void;
@@ -21,34 +19,6 @@ interface Props {
    * graph may be mid-build (added nodes, no edges yet) or about to mutate
    * again — manual runs are blocked until the turn settles. */
   orchestrating?: boolean;
-}
-
-function buildErrorPrompt({
-  runId, error,
-}: {
-  runId: string;
-  error: string;
-}): string {
-  const shortId = runId.slice(0, 8);
-  return `Run ${shortId} failed:\n\n${error}\n\nPlease diagnose.`;
-}
-
-function SendErrorButton({
-  onClick,
-}: {
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="ed-btn ed-btn--mini"
-      onClick={onClick}
-      title="forward this error to the orchestrator"
-      style={{ marginBottom: 10 }}
-    >
-      send to orchestrator <span className="ed-btn__mark">→</span>
-    </button>
-  );
 }
 
 /**
@@ -108,7 +78,6 @@ export function RunPanel({
   onStart,
   onCancel,
   onClose,
-  onSendErrorToOrchestrator,
   onViewRunOnCanvas,
   orchestrating,
 }: Props) {
@@ -246,18 +215,6 @@ export function RunPanel({
             />
           </div>
         ))}
-
-        {ownRun && (
-          <RunSummaryCard
-            workflow={workflow}
-            runId={ownRun.id}
-            status={ownRun.status}
-            error={ownRun.error}
-            cost={ownRun.totalCost}
-            outputs={ownRun.finalOutputs}
-            onSendErrorToOrchestrator={onSendErrorToOrchestrator}
-          />
-        )}
 
         {history.length > 0 && (
           <div style={{ marginTop: 22 }}>
@@ -399,142 +356,3 @@ export function RunPanel({
   );
 }
 
-// Renders the final output of a run as a list of click-to-expand port rows.
-// The backend emits `outputs` as a port-name → value dict (one entry per
-// output port on the output node); each entry becomes one row.
-function FinalOutputBlock({
-  workflow,
-  outputs,
-}: {
-  workflow: WorkflowDetail;
-  outputs: Record<string, unknown>;
-}) {
-  const outNode = workflow.nodes.find((n) => n.id === workflow.output_node_id);
-  const schemaByName = new Map((outNode?.outputs ?? []).map((p) => [p.name, p]));
-  const keys = Object.keys(outputs);
-  return (
-    <div style={{ marginBottom: 4 }}>
-      <div className="smallcaps" style={{ marginBottom: 6, color: 'var(--state-ok)' }}>
-        final output
-      </div>
-      {keys.length === 0 ? (
-        <span
-          className="serif"
-          style={{ fontStyle: 'italic', fontSize: 11.5, color: 'var(--ink-4)' }}
-        >
-          none
-        </span>
-      ) : (
-        keys.map((k) => (
-          <PortRow
-            key={k}
-            name={k}
-            typeHint={schemaByName.get(k)?.type_hint}
-            value={outputs[k]}
-            viewerTitle={`final · ${k}`}
-          />
-        ))
-      )}
-    </div>
-  );
-}
-
-// Top-level run summary — status, error, final outputs, cost. Per-node trace
-// detail lives on the canvas: click a node to drill in via the node panel's
-// `trace` tab. Keeps this surface clean for the run's headline result.
-function RunSummaryCard({
-  workflow, runId, status, error, cost, outputs, onSendErrorToOrchestrator,
-}: {
-  workflow: WorkflowDetail;
-  runId: string;
-  status: string;
-  error: string | null;
-  cost: number;
-  outputs: Record<string, unknown> | null;
-  onSendErrorToOrchestrator: (message: string) => void;
-}) {
-  const hasFinal = status === 'success' && outputs && Object.keys(outputs).length > 0;
-  const isRunning = status === 'running' || status === 'pending';
-  return (
-    <div
-      style={{
-        marginTop: 14,
-        padding: 16,
-        background: isRunning ? '#fbf7ec' : 'var(--paper-2)',
-        border: '1px solid var(--rule)',
-        borderLeft: isRunning
-          ? '3px solid var(--state-run)'
-          : '1px solid var(--rule)',
-        borderRadius: 3,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        {isRunning && (
-          <span
-            className="node-state-dot running"
-            style={{ alignSelf: 'center' }}
-            aria-hidden="true"
-          />
-        )}
-        {status === 'success' && (
-          <span
-            className="node-state-dot success"
-            style={{ alignSelf: 'center' }}
-            aria-hidden="true"
-          />
-        )}
-        <span
-          className="smallcaps"
-          style={{
-            color:
-              isRunning ? 'var(--state-run)' :
-              status === 'success' ? 'var(--state-ok)' :
-              status === 'error' ? 'var(--state-err)' :
-              status === 'cancelled' ? 'var(--ink-3)' : 'var(--ink-3)',
-            fontSize:
-              isRunning || status === 'success' || status === 'error' ? 14 : undefined,
-            fontWeight: isRunning ? 600 : undefined,
-            letterSpacing: isRunning ? '0.12em' : undefined,
-          }}
-        >
-          {isRunning ? 'running…' :
-           status === 'success' ? 'success' :
-           status === 'error' ? '× error' :
-           status === 'cancelled' ? '— cancelled' :
-           `· ${status}`}
-        </span>
-        <span style={{ flex: 1 }} />
-        <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-4)' }}>
-          {runId.slice(0, 8)}
-        </span>
-      </div>
-      {error && (
-        <>
-          <pre
-            className="mono"
-            style={{ fontSize: 11, color: 'var(--state-err)', whiteSpace: 'pre-wrap', margin: '0 0 8px' }}
-          >
-            {error}
-          </pre>
-          <SendErrorButton
-            onClick={() => onSendErrorToOrchestrator(buildErrorPrompt({ runId, error }))}
-          />
-        </>
-      )}
-      {hasFinal && outputs && <FinalOutputBlock workflow={workflow} outputs={outputs} />}
-      {!hasFinal && !error && (
-        <div
-          className="serif"
-          style={{ fontStyle: 'italic', fontSize: 12.5, color: 'var(--ink-4)' }}
-        >
-          {isRunning
-            ? 'click a node on the canvas to inspect its trace.'
-            : 'no outputs.'}
-        </div>
-      )}
-      <div className="serif" style={{ fontStyle: 'italic', fontSize: 12, color: 'var(--ink-4)', marginTop: 10 }}>
-        cost — ${cost.toFixed(4)}
-      </div>
-    </div>
-  );
-}

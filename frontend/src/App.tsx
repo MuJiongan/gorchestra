@@ -8,6 +8,7 @@ import { PortRow } from './components/ValueViewer';
 import { SettingsPanel } from './components/Settings';
 import { api } from './api';
 import { loadSettings, SETTINGS_CHANGED_EVENT } from './localSettings';
+import { ensureNotificationPermission, notifyRunFinished } from './notify';
 import type {
   Workflow, WorkflowDetail, CurrentRun, RunEvent, RunStatus, NodeRunStatus,
   OrchestratorEvent, ChatHistoryMessage, Run,
@@ -479,6 +480,9 @@ export default function App() {
     initialStatus: RunStatus = 'running',
     executesOnSnapshot: boolean = false,
   ) => {
+    ensureNotificationPermission();
+    const workflowName =
+      workflows.find((w) => w.id === workflowId)?.name ?? 'workflow';
     setCurrentRun({
       id: runId,
       workflow_id: workflowId,
@@ -497,6 +501,14 @@ export default function App() {
     ws.onmessage = (e) => {
       let ev: RunEvent;
       try { ev = JSON.parse(e.data) as RunEvent; } catch { return; }
+      if (ev.type === 'run_finished') {
+        notifyRunFinished({
+          runId,
+          workflowName,
+          status: ev.status,
+          error: ev.error,
+        });
+      }
       setCurrentRun((cur) => {
         if (!cur || cur.id !== runId) return cur;
         const nextStates = { ...cur.nodeStates };
@@ -511,6 +523,22 @@ export default function App() {
           finalOutputs = ev.outputs;
           error = ev.error;
           totalCost = ev.total_cost;
+          // Defensive sweep: if the runner ever fails to emit node_finished
+          // for a node (escaped exception, dropped event, cancel mid-flight),
+          // the dot would be stuck on running/pending forever. Once
+          // run_finished arrives the runner is done — force any non-terminal
+          // state to a sensible terminal one. "running" → "error" (the node
+          // started but never resolved); "pending" → "skipped" (never
+          // started). On a cancelled run prefer "skipped" for both — those
+          // nodes didn't fail, they just got interrupted.
+          for (const nid of Object.keys(nextStates)) {
+            const s = nextStates[nid];
+            if (s === 'running') {
+              nextStates[nid] = ev.status === 'cancelled' ? 'skipped' : 'error';
+            } else if (s === 'pending') {
+              nextStates[nid] = 'skipped';
+            }
+          }
         }
         return {
           ...cur,
@@ -776,7 +804,6 @@ export default function App() {
                     currentRun={currentRun}
                     onStart={startRun}
                     onCancel={cancelRun}
-                    onSendErrorToOrchestrator={sendErrorToOrchestrator}
                     onViewRunOnCanvas={enterSnapshotView}
                     orchestrating={isOrchestrating}
                   />

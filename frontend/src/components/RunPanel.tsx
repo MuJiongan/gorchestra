@@ -136,6 +136,22 @@ export function RunPanel({
     }
   }, [ownRun?.status, workflow.id]);
 
+  // While any row in `history` still reads as running/pending, poll so its
+  // status flips once the backend marks it terminal. Covers the case where
+  // the panel didn't observe the run start (e.g. reopened mid-flight) so
+  // `ownRun` is null and the effect above never fires. Self-stops once no
+  // row is in flight.
+  const anyHistoryRunning = history.some(
+    (h) => h.status === 'running' || h.status === 'pending',
+  );
+  useEffect(() => {
+    if (!anyHistoryRunning) return;
+    const id = setInterval(() => {
+      api.listRuns(workflow.id).then(setHistory).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [anyHistoryRunning, workflow.id]);
+
   const start = () => {
     if (!workflow.input_node_id) {
       alert('set an input node first (click a node, then "set as input").');

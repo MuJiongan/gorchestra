@@ -654,7 +654,8 @@ export default function App() {
               <div
                 style={{
                   flex: 2,
-                  position: 'relative',
+                  display: 'flex',
+                  flexDirection: 'column',
                   borderRight: '1px solid var(--rule)',
                   minWidth: 0,
                 }}
@@ -672,6 +673,10 @@ export default function App() {
                     }
                   />
                 )}
+                {/* Canvas (and the empty-canvas placeholder) need
+                 * `position: relative` to host React Flow's absolute layout.
+                 * Banner stacks above via flex; this wrapper takes the rest. */}
+                <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
                 {viewingRun ? (
                   // Viewing a run's frozen snapshot. Selection is enabled so
                   // the user can drill into a node's code + run trace, but
@@ -729,6 +734,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
+                </div>
               </div>
 
               {/* right 3/5 — node configuration / inputs / outputs */}
@@ -972,11 +978,6 @@ function InFlightRunBanner({
   return (
     <div
       style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        zIndex: 10,
         padding: '6px 12px',
         background: 'var(--paper-2)',
         borderBottom: '1px solid var(--rule)',
@@ -985,6 +986,7 @@ function InFlightRunBanner({
         gap: 8,
         fontSize: 11.5,
         minWidth: 0,
+        flexShrink: 0,
       }}
     >
       <span
@@ -1022,26 +1024,28 @@ function InFlightRunBanner({
         </span>
       </span>
       <span style={{ flex: 1 }} />
-      {!isRunning && (
-        <button
-          type="button"
-          onClick={onExit}
-          style={{
-            background: 'transparent',
-            border: 0,
-            padding: '2px 0',
-            cursor: 'pointer',
-            color: 'var(--accent-ink)',
-            fontSize: 11.5,
-            fontFamily: 'var(--serif)',
-            fontStyle: 'italic',
-            whiteSpace: 'nowrap',
-          }}
-          title="return to the live, editable canvas"
-        >
-          ← live
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={onExit}
+        style={{
+          background: 'transparent',
+          border: 0,
+          padding: '2px 0',
+          cursor: 'pointer',
+          color: 'var(--accent-ink)',
+          fontSize: 11.5,
+          fontFamily: 'var(--serif)',
+          fontStyle: 'italic',
+          whiteSpace: 'nowrap',
+        }}
+        title={
+          isRunning
+            ? 'return to the live editable canvas — the run keeps executing in the background'
+            : 'return to the live, editable canvas'
+        }
+      >
+        ← live
+      </button>
     </div>
   );
 }
@@ -1058,11 +1062,6 @@ function SnapshotBanner({ run, onExit }: { run: Run; onExit: () => void }) {
   return (
     <div
       style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        zIndex: 10,
         padding: '6px 12px',
         background: 'var(--paper-2)',
         borderBottom: '1px solid var(--rule)',
@@ -1071,6 +1070,7 @@ function SnapshotBanner({ run, onExit }: { run: Run; onExit: () => void }) {
         gap: 8,
         fontSize: 11.5,
         minWidth: 0,
+        flexShrink: 0,
       }}
     >
       <span

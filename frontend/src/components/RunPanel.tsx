@@ -259,6 +259,7 @@ export function RunPanel({
             {history.slice(0, 8).map((h) => {
               const summary = summariseRun(h);
               const isId = summary.kind === 'id';
+              const rowRunning = h.status === 'running' || h.status === 'pending';
               return (
                 <button
                   key={h.id}
@@ -277,11 +278,14 @@ export function RunPanel({
                     width: '100%',
                     padding: '6px 8px',
                     margin: '0 -8px',
-                    alignItems: 'baseline',
+                    alignItems: 'center',
                     gap: 8,
-                    background: 'transparent',
-                    borderBottom: '1px solid var(--rule-2)',
+                    background: rowRunning ? '#fbf7ec' : 'transparent',
                     border: 0,
+                    borderBottom: '1px solid var(--rule-2)',
+                    borderLeft: rowRunning
+                      ? '2px solid var(--state-run)'
+                      : '2px solid transparent',
                     cursor: onViewRunOnCanvas ? 'pointer' : 'default',
                     textAlign: 'left',
                   }}
@@ -300,7 +304,16 @@ export function RunPanel({
                   >
                     {summary.text}
                   </span>
-                  <span className="smallcaps" style={{ fontSize: 9 }}>{h.status}</span>
+                  <span
+                    className="smallcaps"
+                    style={{
+                      fontSize: 9,
+                      color: rowRunning ? 'var(--state-run)' : undefined,
+                      fontWeight: rowRunning ? 600 : undefined,
+                    }}
+                  >
+                    {h.status}
+                  </span>
                 </button>
               );
             })}
@@ -322,10 +335,18 @@ export function RunPanel({
           className="serif"
           style={{
             fontStyle: 'italic',
-            color: status === 'error' ? 'var(--state-err)' : 'var(--ink-4)',
+            color:
+              running ? 'var(--state-run)' :
+              status === 'error' ? 'var(--state-err)' : 'var(--ink-4)',
             fontSize: 12,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
           }}
         >
+          {running && !orchestrating && (
+            <span className="node-state-dot running" aria-hidden="true" />
+          )}
           {orchestrating
             ? 'orchestrator working — wait for it to settle'
             : running
@@ -423,24 +444,45 @@ function RunSummaryCard({
       style={{
         marginTop: 14,
         padding: 16,
-        background: 'var(--paper-2)',
+        background: isRunning ? '#fbf7ec' : 'var(--paper-2)',
         border: '1px solid var(--rule)',
+        borderLeft: isRunning
+          ? '3px solid var(--state-run)'
+          : '1px solid var(--rule)',
         borderRadius: 3,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        {isRunning && (
+          <span
+            className="node-state-dot running"
+            style={{ alignSelf: 'center' }}
+            aria-hidden="true"
+          />
+        )}
+        {status === 'success' && (
+          <span
+            className="node-state-dot success"
+            style={{ alignSelf: 'center' }}
+            aria-hidden="true"
+          />
+        )}
         <span
           className="smallcaps"
           style={{
             color:
+              isRunning ? 'var(--state-run)' :
               status === 'success' ? 'var(--state-ok)' :
               status === 'error' ? 'var(--state-err)' :
               status === 'cancelled' ? 'var(--ink-3)' : 'var(--ink-3)',
             fontSize:
-              status === 'success' || status === 'error' ? 14 : undefined,
+              isRunning || status === 'success' || status === 'error' ? 14 : undefined,
+            fontWeight: isRunning ? 600 : undefined,
+            letterSpacing: isRunning ? '0.12em' : undefined,
           }}
         >
-          {status === 'success' ? '✓ result' :
+          {isRunning ? 'running…' :
+           status === 'success' ? 'success' :
            status === 'error' ? '× error' :
            status === 'cancelled' ? '— cancelled' :
            `· ${status}`}

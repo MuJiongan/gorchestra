@@ -18,7 +18,7 @@ export function SnapshotBanner({
       style={{
         padding: '6px 12px',
         background: 'var(--paper-2)',
-        borderBottom: '1px solid var(--rule)',
+        borderTop: '1px solid var(--rule)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',

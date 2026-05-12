@@ -481,11 +481,39 @@ export default function App() {
                 }}
               >
                 {viewingRun && (
-                  <SnapshotBanner run={viewingRun} />
+                  <div
+                    style={{
+                      borderBottom: '1px solid var(--rule)',
+                      background: 'var(--paper-2)',
+                      padding: '10px 12px',
+                      display: 'flex',
+                      justifyContent: 'flex-end',
+                      gap: 8,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={handleForkSnapshot}
+                      className="snapshot-action-btn snapshot-action-btn--secondary"
+                      title="copy this frozen run graph into a new editable project"
+                    >
+                      create project from snapshot
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exitSnapshotView}
+                      className="snapshot-action-btn"
+                      title="return to the live, editable canvas"
+                    >
+                      back to live canvas
+                    </button>
+                  </div>
                 )}
                 {/* Canvas (and the empty-canvas placeholder) need
                  * `position: relative` to host React Flow's absolute layout.
-                 * Banner stacks above via flex; this wrapper takes the rest. */}
+                 * Action bar / banner stack above and below via flex; this
+                 * wrapper takes the rest. */}
                 <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
                 {viewingRun ? (
                   // Viewing a run's frozen snapshot. Selection is enabled so
@@ -557,34 +585,7 @@ export default function App() {
                 )}
                 </div>
                 {viewingRun && (
-                  <div
-                    style={{
-                      borderTop: '1px solid var(--rule)',
-                      background: 'var(--paper-2)',
-                      padding: '10px 12px',
-                      display: 'flex',
-                      justifyContent: 'flex-end',
-                      gap: 8,
-                      flexShrink: 0,
-                    }}
-                  >
-                    <button
-                      type="button"
-                      onClick={handleForkSnapshot}
-                      className="snapshot-action-btn snapshot-action-btn--secondary"
-                      title="copy this frozen run graph into a new editable project"
-                    >
-                      create project from snapshot
-                    </button>
-                    <button
-                      type="button"
-                      onClick={exitSnapshotView}
-                      className="snapshot-action-btn"
-                      title="return to the live, editable canvas"
-                    >
-                      back to live canvas
-                    </button>
-                  </div>
+                  <SnapshotBanner run={viewingRun} />
                 )}
               </div>
 

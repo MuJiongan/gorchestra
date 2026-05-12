@@ -796,7 +796,7 @@ function MessageBubble({
             return (
               <ReactMarkdown
                 key={i}
-                remarkPlugins={[remarkGfm, remarkMath]}
+                remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
                 rehypePlugins={[rehypeKatex]}
                 components={MD_COMPONENTS}
               >

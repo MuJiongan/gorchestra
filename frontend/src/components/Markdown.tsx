@@ -20,7 +20,7 @@ export function Markdown({ children, large = false }: { children: string; large?
       }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
         rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => <p style={{ margin: '0 0 8px' }}>{children}</p>,

@@ -278,6 +278,7 @@ def test_llm_tool_specs_covers_full_surface():
         "set_output_node",
         "clean_canvas",
         "run_workflow",
+        "list_runs",
         "view_run",
     }
 
@@ -493,6 +494,405 @@ def test_view_tools_work_during_active_run(db, workflow):
     assert d["id"] == nid
 
 
+def test_view_run_returns_run_level_summary_by_default(db, workflow):
+    """No `node_id` → run-level summary: outputs, node_errors, error, total_cost."""
+    nid = orch_tools.add_node(db, workflow.id, name="summariser")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id,
+        kind="user",
+        status="error",
+        inputs={"q": "hi"},
+        outputs={"summary": "partial"},
+        error="downstream blew up",
+        total_cost=0.42,
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id,
+            node_id=nid,
+            status="error",
+            inputs={"q": "hi"},
+            outputs={},
+            logs=["loaded", "boom"],
+            error="ValueError: bad input",
+            duration_ms=42,
+            cost=0.01,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(db, workflow.id, run_id=run.id)
+    assert res["run_id"] == run.id
+    assert res["status"] == "error"
+    assert res["outputs"] == {"summary": "partial"}
+    assert res["error"] == "downstream blew up"
+    assert res["total_cost"] == 0.42
+    assert res["node_errors"] == [
+        {"node_id": nid, "node_name": "summariser", "error": "ValueError: bad input"}
+    ]
+    # Summary form must NOT carry per-node logs/inputs.
+    assert "logs" not in res
+    assert "node_id" not in res
+
+
+def test_view_run_with_node_id_returns_node_inputs_outputs_logs(db, workflow):
+    """`node_id` → per-node record: inputs, outputs, logs, status, error, etc."""
+    nid = orch_tools.add_node(db, workflow.id, name="loader")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id,
+        kind="user",
+        status="success",
+        inputs={"path": "/tmp/x"},
+        outputs={"items": [1, 2, 3]},
+        total_cost=0.05,
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id,
+            node_id=nid,
+            status="success",
+            inputs={"path": "/tmp/x"},
+            outputs={"items": [1, 2, 3]},
+            logs=["reading /tmp/x", "got 3 rows"],
+            error=None,
+            duration_ms=17,
+            cost=0.02,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(db, workflow.id, run_id=run.id, node_id=nid)
+    assert res == {
+        "run_id": run.id,
+        "node_id": nid,
+        "node_name": "loader",
+        "status": "success",
+        "inputs": {"path": "/tmp/x"},
+        "outputs": {"items": [1, 2, 3]},
+        "logs": ["reading /tmp/x", "got 3 rows"],
+        "error": None,
+        "duration_ms": 17,
+        "cost": 0.02,
+    }
+
+
+def test_view_run_with_node_id_uses_snapshot_name_after_rename(db, workflow):
+    """When the live node has been renamed since the run, prefer the
+    snapshot's name — that's the name the user saw when the run executed."""
+    nid = orch_tools.add_node(db, workflow.id, name="loader")["node_id"]
+    snapshot = {"nodes": [{"id": nid, "name": "loader"}], "edges": []}
+    run = models.Run(
+        workflow_id=workflow.id,
+        kind="user",
+        status="success",
+        inputs={},
+        outputs={},
+        workflow_snapshot=snapshot,
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="success",
+            inputs={}, outputs={}, logs=[], duration_ms=0, cost=0.0,
+        )
+    )
+    db.commit()
+
+    orch_tools.rename_node(db, workflow.id, node_id=nid, new_name="loader_v2")
+
+    res = orch_tools.view_run(db, workflow.id, run_id=run.id, node_id=nid)
+    assert res["node_name"] == "loader"
+
+
+def test_view_run_with_unknown_node_id_returns_error(db, workflow):
+    """If the node never executed (no NodeRun row), surface a clear error
+    rather than an empty record."""
+    nid = orch_tools.add_node(db, workflow.id, name="reached")["node_id"]
+    skipped = orch_tools.add_node(db, workflow.id, name="never_reached")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="error",
+        inputs={}, outputs={}, error="reached failed",
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="error",
+            inputs={}, outputs={}, logs=[], error="boom",
+            duration_ms=1, cost=0.0,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(db, workflow.id, run_id=run.id, node_id=skipped)
+    assert "error" in res
+    assert skipped in res["error"]
+    assert "did not execute" in res["error"]
+
+
+def test_view_run_node_id_dispatches_via_execute(db, workflow):
+    """`execute()` must forward the optional `node_id` arg through to the tool."""
+    nid = orch_tools.add_node(db, workflow.id, name="n")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="success",
+            inputs={"a": 1}, outputs={"b": 2}, logs=["hi"],
+            duration_ms=5, cost=0.0,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.execute(
+        db, workflow.id, "view_run", {"run_id": run.id, "node_id": nid}
+    )
+    assert res["node_id"] == nid
+    assert res["inputs"] == {"a": 1}
+    assert res["outputs"] == {"b": 2}
+    assert res["logs"] == ["hi"]
+
+
+def test_view_run_schema_advertises_optional_node_id_and_fields():
+    """The OpenRouter tool schema must expose `node_id` and `fields` as
+    optional parameters — required list stays as just `run_id`. `fields` is
+    an array of enum constrained to {inputs, outputs, logs}."""
+    spec = orch_tools.TOOL_SCHEMAS["view_run"]
+    params = spec["function"]["parameters"]
+    assert set(params["properties"].keys()) == {"run_id", "node_id", "fields"}
+    assert params["required"] == ["run_id"]
+    fields_spec = params["properties"]["fields"]
+    assert fields_spec["type"] == "array"
+    assert fields_spec["items"]["enum"] == ["inputs", "outputs", "logs"]
+    assert fields_spec.get("uniqueItems") is True
+
+
+def test_view_run_node_fields_filters_to_requested_slice(db, workflow):
+    """`fields=["logs"]` returns only logs (plus the always-present metadata)
+    — `inputs` and `outputs` are omitted entirely from the dict."""
+    nid = orch_tools.add_node(db, workflow.id, name="loader")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="success",
+            inputs={"path": "/tmp/x"},
+            outputs={"items": [1, 2, 3]},
+            logs=["reading", "done"],
+            duration_ms=9, cost=0.0,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(
+        db, workflow.id, run_id=run.id, node_id=nid, fields=["logs"]
+    )
+    assert res["logs"] == ["reading", "done"]
+    assert "inputs" not in res
+    assert "outputs" not in res
+    # Metadata still present.
+    assert res["status"] == "success"
+    assert res["node_name"] == "loader"
+    assert res["duration_ms"] == 9
+
+
+def test_view_run_node_fields_accepts_multiple_and_dedupes(db, workflow):
+    """Multi-select works; duplicates in `fields` don't break anything."""
+    nid = orch_tools.add_node(db, workflow.id, name="n")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="success",
+            inputs={"a": 1}, outputs={"b": 2}, logs=["hi"],
+            duration_ms=1, cost=0.0,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(
+        db, workflow.id, run_id=run.id, node_id=nid,
+        fields=["inputs", "outputs", "inputs"],
+    )
+    assert res["inputs"] == {"a": 1}
+    assert res["outputs"] == {"b": 2}
+    assert "logs" not in res
+
+
+def test_view_run_node_fields_rejects_unknown_field(db, workflow):
+    nid = orch_tools.add_node(db, workflow.id, name="n")["node_id"]
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    db.add(
+        models.NodeRun(
+            run_id=run.id, node_id=nid, status="success",
+            inputs={}, outputs={}, logs=[], duration_ms=0, cost=0.0,
+        )
+    )
+    db.commit()
+
+    res = orch_tools.view_run(
+        db, workflow.id, run_id=run.id, node_id=nid, fields=["bogus"]
+    )
+    assert "error" in res
+    assert "bogus" in res["error"]
+
+
+def test_list_runs_returns_recent_first_with_lean_shape(db, workflow):
+    """`list_runs` returns the most recent runs first, each as the lean
+    metadata-only shape — no inputs/outputs/node_runs payload."""
+    import time
+    from datetime import datetime, timedelta
+
+    # Three runs, oldest → newest. Set started_at explicitly so ordering
+    # doesn't depend on the test taking measurable wall time.
+    base = datetime(2026, 5, 10, 12, 0, 0)
+    r_old = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={"big": "x" * 1000}, total_cost=0.10,
+        started_at=base, ended_at=base + timedelta(seconds=5),
+    )
+    r_mid = models.Run(
+        workflow_id=workflow.id, kind="orchestrator", status="error",
+        inputs={}, outputs={}, error="boom", total_cost=0.05,
+        started_at=base + timedelta(minutes=1),
+        ended_at=base + timedelta(minutes=1, seconds=2),
+    )
+    r_new = models.Run(
+        workflow_id=workflow.id, kind="user", status="running",
+        inputs={}, outputs={}, total_cost=0.0,
+        started_at=base + timedelta(minutes=2),
+    )
+    db.add_all([r_old, r_mid, r_new])
+    db.commit()
+
+    res = orch_tools.list_runs(db, workflow.id)
+    assert res["count"] == 3
+    assert res["limit"] == 20
+    assert [r["run_id"] for r in res["runs"]] == [r_new.id, r_mid.id, r_old.id]
+
+    # Lean shape — no heavy fields leaked.
+    first = res["runs"][0]
+    assert set(first.keys()) == {
+        "run_id", "status", "kind", "started_at", "ended_at", "total_cost", "error",
+    }
+    assert first["status"] == "running"
+    assert first["ended_at"] is None
+    assert first["error"] is None
+
+    mid = res["runs"][1]
+    assert mid["kind"] == "orchestrator"
+    assert mid["status"] == "error"
+    assert mid["error"] == "boom"
+    assert mid["total_cost"] == 0.05
+    assert mid["started_at"] == (base + timedelta(minutes=1)).isoformat()
+
+
+def test_list_runs_respects_limit_and_clamps_to_max(db, workflow):
+    """`limit` trims the page; absurd values clamp to the hard ceiling."""
+    from datetime import datetime, timedelta
+
+    base = datetime(2026, 5, 10, 12, 0, 0)
+    for i in range(5):
+        db.add(
+            models.Run(
+                workflow_id=workflow.id, kind="user", status="success",
+                inputs={}, outputs={}, total_cost=0.0,
+                started_at=base + timedelta(minutes=i),
+            )
+        )
+    db.commit()
+
+    res = orch_tools.list_runs(db, workflow.id, limit=2)
+    assert res["count"] == 2
+    assert res["limit"] == 2
+
+    # Way over the ceiling clamps to MAX (100). Doesn't fabricate rows.
+    res_big = orch_tools.list_runs(db, workflow.id, limit=10_000)
+    assert res_big["limit"] == 100
+    assert res_big["count"] == 5
+
+
+def test_list_runs_empty_when_no_runs(db, workflow):
+    res = orch_tools.list_runs(db, workflow.id)
+    assert res == {"runs": [], "count": 0, "limit": 20}
+
+
+def test_run_workflow_tags_run_as_orchestrator_kind(db, workflow, monkeypatch):
+    """Runs the orchestrator triggers via `run_workflow` are tagged
+    `kind="orchestrator"` so `list_runs` can distinguish them from runs the
+    user kicked off directly (which stay `kind="user"`)."""
+    from app.runner import service as run_service
+
+    # The orchestrator's run_workflow shells out to start_run for actual
+    # execution — stub it out so this stays a unit test.
+    monkeypatch.setattr(run_service, "start_run", lambda *a, **kw: None)
+
+    nid = orch_tools.add_node(
+        db, workflow.id, name="passthrough",
+        inputs=[{"name": "q", "required": True}],
+        outputs=[{"name": "out"}],
+    )["node_id"]
+    orch_tools.set_input_node(db, workflow.id, node_id=nid)
+    orch_tools.set_output_node(db, workflow.id, node_id=nid)
+
+    res = orch_tools.run_workflow(db, workflow.id, inputs={"q": "hi"})
+    assert res["status"] == "running"
+    rid = res["run_id"]
+
+    row = db.get(models.Run, rid)
+    assert row is not None
+    assert row.kind == "orchestrator"
+
+
+def test_list_runs_unknown_workflow_errors_via_execute(db):
+    res = orch_tools.execute(db, "no-such-workflow", "list_runs", {})
+    assert "error" in res
+    assert "no-such-workflow" in res["error"]
+
+
+def test_list_runs_works_during_active_run(db, workflow):
+    """Like the other read-only tools, `list_runs` must NOT be blocked by
+    the run-in-progress lock."""
+    from app.runner import events as ev_mod
+
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="running", inputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    ev_mod.get_or_create(run.id)
+
+    res = orch_tools.execute(db, workflow.id, "list_runs", {})
+    assert "error" not in res
+    assert any(r["run_id"] == run.id for r in res["runs"])
+
+
+def test_view_run_fields_without_node_id_is_an_error(db, workflow):
+    """`fields` only makes sense for the per-node form — reject otherwise
+    instead of silently ignoring it."""
+    run = models.Run(
+        workflow_id=workflow.id, kind="user", status="success",
+        inputs={}, outputs={},
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    res = orch_tools.view_run(db, workflow.id, run_id=run.id, fields=["logs"])
+    assert "error" in res
+    assert "node_id" in res["error"]
+
+
 def test_run_snapshot_survives_subsequent_graph_mutation(db, workflow):
     """A `Run` row's `workflow_snapshot` is frozen at creation — removing
     nodes/edges afterwards must not perturb it. This is the contract that
@@ -617,6 +1017,7 @@ def test_non_graph_mutating_tools_set_matches_registry():
     assert orch_tools.NON_GRAPH_MUTATING_TOOLS == {
         "view_graph",
         "view_node_details",
+        "list_runs",
         "view_run",
         "run_workflow",
     }

@@ -54,7 +54,12 @@ class Run(Base):
     __tablename__ = "runs"
     id = Column(String, primary_key=True, default=uid)
     workflow_id = Column(String, ForeignKey("workflows.id"), nullable=False)
-    kind = Column(String, default="user")  # "user" | "test"
+    # Who/what triggered this run. "user" — started directly by the user
+    # (the run button, the REST API). "orchestrator" — kicked off by the
+    # chat orchestrator's `run_workflow` tool on the user's behalf. Both
+    # execute identically; the tag just records provenance so the run list
+    # can distinguish them.
+    kind = Column(String, default="user")  # "user" | "orchestrator"
     status = Column(String, default="pending")  # pending|running|success|error|cancelled
     inputs = Column(JSON, default=dict)
     outputs = Column(JSON, default=dict)

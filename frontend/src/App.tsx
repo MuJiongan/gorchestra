@@ -497,7 +497,14 @@ export default function App() {
                       <Canvas
                         detail={snapDetail}
                         selectedNodeId={selectedSnapshotNodeId}
-                        onSelectNode={(id) => setSelectedSnapshotNodeId(id)}
+                        onSelectNode={(id) => {
+                          setSelectedSnapshotNodeId(id);
+                          // Clicking a canvas node from the chat tab should
+                          // surface the node detail; the chat hides the
+                          // workspace where NodePanel lives. Pane deselects
+                          // (id === null) shouldn't yank the user out of chat.
+                          if (id !== null) setRightPanelMode('workspace');
+                        }}
                         nodeStates={snapshotNodeStates}
                       />
                     ) : null;
@@ -506,7 +513,10 @@ export default function App() {
                   <Canvas
                     detail={detail}
                     selectedNodeId={selectedNodeId}
-                    onSelectNode={(id) => setSelectedNodeId(id)}
+                    onSelectNode={(id) => {
+                      setSelectedNodeId(id);
+                      if (id !== null) setRightPanelMode('workspace');
+                    }}
                     // Overlay live node states for runs that execute on the
                     // live graph (manual run, orchestrator-triggered run).
                     // Skip for snapshot reruns — their snapshot can diverge

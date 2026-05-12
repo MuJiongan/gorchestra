@@ -233,7 +233,8 @@ Inspection is always safe; mutation is blocked while a workflow run is executing
 ## run
 
 - `run_workflow(inputs)` — trigger a run with the given inputs; blocks until the run finishes. Returns *only* `{run_id, status, total_cost}` — outputs are deliberately not relayed back to you (the user reads them in the run panel).
-- `view_run(run_id)` — fetch the full state of a run: `{run_id, status, outputs, node_errors, error, total_cost}`. Use this on error/cancelled paths or when answering follow-ups about a specific run; don't reach for it on success unless the user asks you to inspect outputs.
+- `list_runs(limit?)` — list past runs for this workflow, most recent first, as `{run_id, status, kind, started_at, ended_at, total_cost, error}`. Use when the user refers to a past run without giving you its id ("the last failure", "yesterday's run") so you can find the right `run_id` to feed into `view_run`. Don't list preemptively — turn-state ships the graph, not run history.
+- `view_run(run_id, node_id?, fields?)` — fetch the state of a run. Without `node_id`, returns the run-level summary `{run_id, status, outputs, node_errors, error, total_cost}`. With `node_id`, returns that node's per-run record — the lightweight metadata (`run_id, node_id, node_name, status, error, duration_ms, cost`) plus the heavy fields gated by `fields` (any subset of `["inputs", "outputs", "logs"]`; all three when omitted). Use the run-level form on error/cancelled paths or when answering follow-ups; drill in with `node_id` when the run-level summary doesn't localise the problem, and pass `fields` to grab just the slice you need (e.g. `fields=["logs"]` for an opaque node's trace, `fields=["outputs"]` for a research node's findings). Don't reach for any of this on success unless the user asks you to inspect outputs.
 
 # when to run
 

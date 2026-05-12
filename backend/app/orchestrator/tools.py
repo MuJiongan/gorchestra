@@ -379,7 +379,7 @@ def run_workflow(
 
     run = models.Run(
         workflow_id=wid,
-        kind="user",
+        kind="orchestrator",
         status="running",
         inputs=inputs,
         workflow_snapshot=wf_data,
@@ -519,13 +519,162 @@ def wait_for_run(
     }
 
 
-def view_run(db: DbSession, wid: str, *, run_id: str) -> dict:
-    """Return a run's full current state from the DB: ``{run_id, status,
-    outputs, node_errors, error, total_cost}``. Use this on the error/cancelled
-    paths where ``run_workflow`` deliberately omits details, on a run that
-    was interrupted (e.g. the orchestrator turn was cancelled while waiting),
-    or to answer follow-up questions about a specific run."""
-    return _materialise_run(db, wid, run_id, full=True)
+_NODE_FIELDS: tuple[str, ...] = ("inputs", "outputs", "logs")
+
+
+_DEFAULT_RUN_LIST_LIMIT = 20
+_MAX_RUN_LIST_LIMIT = 100
+
+
+def list_runs(db: DbSession, wid: str, *, limit: int = _DEFAULT_RUN_LIST_LIMIT) -> dict:
+    """List historic runs for the workflow, most recent first. Returns a
+    lean shape per run — ``{run_id, status, kind, started_at, ended_at,
+    total_cost, error}`` — that's enough to identify a run; drill into
+    contents with :func:`view_run`.
+
+    ``kind`` is one of:
+    - ``"user"`` — the user clicked Run (or hit the REST API directly).
+    - ``"orchestrator"`` — *you* started it via :func:`run_workflow`.
+
+    ``limit`` is clamped to ``[1, 100]`` (default 20). Older runs beyond the
+    limit aren't returned; raise ``limit`` if the user asks about a run that
+    isn't in the first page.
+    """
+    _get_workflow(db, wid)  # 404 the workflow rather than silently returning [].
+
+    if not isinstance(limit, int) or limit < 1:
+        limit = _DEFAULT_RUN_LIST_LIMIT
+    limit = min(limit, _MAX_RUN_LIST_LIMIT)
+
+    rows = (
+        db.query(models.Run)
+        .filter(models.Run.workflow_id == wid)
+        .order_by(models.Run.started_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    runs = [
+        {
+            "run_id": r.id,
+            "status": r.status,
+            "kind": r.kind,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "total_cost": float(r.total_cost or 0.0),
+            "error": r.error,
+        }
+        for r in rows
+    ]
+    return {"runs": runs, "count": len(runs), "limit": limit}
+
+
+def view_run(
+    db: DbSession,
+    wid: str,
+    *,
+    run_id: str,
+    node_id: str | None = None,
+    fields: list[str] | None = None,
+) -> dict:
+    """Return a run's state from the DB.
+
+    Without ``node_id`` (the default), returns the run-level summary:
+    ``{run_id, status, outputs, node_errors, error, total_cost}``. Use this on
+    error/cancelled paths where ``run_workflow`` deliberately omits details,
+    on a run that was interrupted (e.g. the orchestrator turn was cancelled
+    while waiting), or to answer follow-up questions about a specific run.
+
+    With ``node_id``, returns the per-node record for that node within the
+    run. Always includes the lightweight metadata
+    ``{run_id, node_id, node_name, status, error, duration_ms, cost}``; the
+    heavy fields ``inputs``, ``outputs``, ``logs`` are gated by ``fields``.
+
+    ``fields`` is the per-node selector — any subset of
+    ``["inputs", "outputs", "logs"]``. When omitted, all three are returned
+    (back-compat with the unfiltered call). Pass a strict subset to drill in
+    on just what you need — e.g. ``fields=["logs"]`` to read only the
+    captured ``ctx.log(...)`` lines without paying for big ``outputs``.
+    Only valid alongside ``node_id``.
+    """
+    if fields is not None and node_id is None:
+        return {"error": "`fields` is only valid together with `node_id`"}
+
+    if node_id is None:
+        return _materialise_run(db, wid, run_id, full=True)
+
+    if fields is not None:
+        if not isinstance(fields, list) or not fields:
+            return {"error": "`fields` must be a non-empty list"}
+        bad = [f for f in fields if f not in _NODE_FIELDS]
+        if bad:
+            return {
+                "error": (
+                    f"unknown field(s) {bad}; allowed: {list(_NODE_FIELDS)}"
+                )
+            }
+        selected: tuple[str, ...] = tuple(dict.fromkeys(fields))  # dedupe, preserve order
+    else:
+        selected = _NODE_FIELDS
+
+    return _materialise_node_run(db, wid, run_id, node_id, selected)
+
+
+def _materialise_node_run(
+    db: DbSession,
+    wid: str,
+    run_id: str,
+    node_id: str,
+    fields: tuple[str, ...],
+) -> dict:
+    """Read a single NodeRun row for ``(run_id, node_id)`` into a result dict.
+    Only the requested ``fields`` (subset of ``inputs``/``outputs``/``logs``)
+    are populated; the lightweight metadata is always included.
+    Returns ``{error: ...}`` if the run isn't in this workflow or the node
+    didn't execute (e.g. upstream failed before reaching it)."""
+    db.expire_all()
+    run = db.get(models.Run, run_id)
+    if run is None or run.workflow_id != wid:
+        return {"error": f"run {run_id} not found in workflow {wid}"}
+
+    nr = next((x for x in (run.node_runs or []) if x.node_id == node_id), None)
+    if nr is None:
+        return {
+            "error": (
+                f"node {node_id} did not execute in run {run_id} "
+                "(no NodeRun row — likely never reached, e.g. upstream failed)"
+            )
+        }
+
+    # Resolve a friendly name from the workflow snapshot first (so it matches
+    # what the run actually executed against), falling back to the live graph.
+    node_name = node_id
+    snap = run.workflow_snapshot or {}
+    for sn in snap.get("nodes") or []:
+        if sn.get("id") == node_id:
+            node_name = sn.get("name") or node_id
+            break
+    else:
+        live = db.get(models.Node, node_id)
+        if live is not None and live.workflow_id == wid:
+            node_name = live.name
+
+    out: dict = {
+        "run_id": run_id,
+        "node_id": node_id,
+        "node_name": node_name,
+        "status": nr.status,
+        "error": nr.error,
+        "duration_ms": int(nr.duration_ms or 0),
+        "cost": float(nr.cost or 0.0),
+    }
+    if "inputs" in fields:
+        out["inputs"] = nr.inputs or {}
+    if "outputs" in fields:
+        out["outputs"] = nr.outputs or {}
+    if "logs" in fields:
+        out["logs"] = nr.logs or []
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +695,7 @@ REGISTRY = {
     "set_output_node": set_output_node,
     "clean_canvas": clean_canvas,
     "run_workflow": run_workflow,
+    "list_runs": list_runs,
     "view_run": view_run,
 }
 
@@ -558,6 +708,7 @@ REGISTRY = {
 NON_GRAPH_MUTATING_TOOLS: set[str] = {
     "view_graph",
     "view_node_details",
+    "list_runs",
     "view_run",
     "run_workflow",
 }
@@ -782,23 +933,87 @@ TOOL_SCHEMAS: dict[str, dict] = {
             },
         },
     },
+    "list_runs": {
+        "type": "function",
+        "function": {
+            "name": "list_runs",
+            "description": (
+                "List historic runs for this workflow, most recent first. Returns a lean "
+                "shape per run — {run_id, status, kind, started_at, ended_at, total_cost, "
+                "error} — enough to identify a run; drill into contents with `view_run`. "
+                "`kind` is `\"user\"` (the user hit Run / the REST API) or `\"orchestrator\"` "
+                "(you started it via `run_workflow`). Use when the user references a past run "
+                "without giving you its id (\"the last failure\", \"yesterday's run\"), or "
+                "when you need to find a specific run to inspect. Don't list runs "
+                "preemptively — every turn already ships the current graph state, not run "
+                "history."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_RUN_LIST_LIMIT,
+                        "description": (
+                            f"How many runs to return (default {_DEFAULT_RUN_LIST_LIMIT}, "
+                            f"max {_MAX_RUN_LIST_LIMIT}). Most recent first. Older runs are "
+                            "truncated; raise this if a run you need is missing."
+                        ),
+                    },
+                },
+            },
+        },
+    },
     "view_run": {
         "type": "function",
         "function": {
             "name": "view_run",
             "description": (
-                "Return a run's full state from the DB: {run_id, status, outputs, node_errors, "
-                "error, total_cost}. *Default: don't call this.* Use it ONLY when you "
-                "absolutely cannot proceed without the run's contents — diagnosing a failure "
-                "(`status: \"error\"` or `\"cancelled\"`), reading a research node's findings "
-                "before continuing the build, handing off between stages of a multi-workflow "
-                "solve where the previous run's outputs are the input to designing the next "
-                "graph, or checking on an interrupted run. On a successful end-user run, do "
-                "NOT call this just to summarise — the user reads outputs in the run panel."
+                "Return a run's state from the DB. *Default: don't call this.* Use it ONLY "
+                "when you absolutely cannot proceed without the run's contents — diagnosing a "
+                "failure (`status: \"error\"` or `\"cancelled\"`), reading a research node's "
+                "findings before continuing the build, handing off between stages of a "
+                "multi-workflow solve where the previous run's outputs are the input to "
+                "designing the next graph, or checking on an interrupted run. On a successful "
+                "end-user run, do NOT call this just to summarise — the user reads outputs in "
+                "the run panel.\n\n"
+                "Without `node_id`, returns the run-level summary: {run_id, status, outputs, "
+                "node_errors, error, total_cost}.\n\n"
+                "With `node_id`, returns the per-node record for that node within the run. "
+                "Always includes the lightweight metadata {run_id, node_id, node_name, "
+                "status, error, duration_ms, cost}; the heavy fields (`inputs`, `outputs`, "
+                "`logs`) are gated by `fields`. Use this to localise a failure or inspect "
+                "intermediate state when the run-level summary isn't enough."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"run_id": {"type": "string"}},
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "node_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional. If set, return the per-node record for this node "
+                            "within the run instead of the run-level summary."
+                        ),
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["inputs", "outputs", "logs"],
+                        },
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "description": (
+                            "Per-node selector — only valid alongside `node_id`. Pick any "
+                            "subset of [\"inputs\", \"outputs\", \"logs\"] to drill in on "
+                            "just what you need (e.g. `[\"logs\"]` to read only the "
+                            "`ctx.log(...)` lines without paying for big outputs). When "
+                            "omitted, all three are returned."
+                        ),
+                    },
+                },
                 "required": ["run_id"],
             },
         },
